@@ -1,126 +1,139 @@
-# opencode-delegated-access
+# Delegated Access
 
-An [OpenCode](https://opencode.ai) plugin that auto-approves safe bash commands using an LLM safety classifier, and escalates risky ones via an interactive OS notification. Inspired by [Claude's auto mode](https://claude.com/blog/auto-mode).
+Stop smashing the Approve button. Delegated Access gives [OpenCode](https://opencode.ai) an AI safety reviewer that auto-approves the boring stuff and escalates the scary stuff to your desktop, so you can actually keep working instead of babysitting the terminal.
 
-**Status:** v0.1.0, early. macOS-first. See [`docs/superpowers/specs/`](./docs/superpowers/specs/) for the full design spec.
+Think of it as Claude's [auto mode](https://claude.com/blog/auto-mode) — but for OpenCode, and you control it.
 
-## What it does
+## Why you want this
 
-When OpenCode would normally prompt you to approve a **bash** command:
+Right now, OpenCode stops and asks before every bash command. `ls`. `git status`. `npm test`. Every one of them pulls you back into the loop.
 
-1. The plugin intercepts the approval via the `permission.ask` hook.
-2. A small, fast LLM (Haiku-class by default) classifies the command as SAFE or RISKY, given the command and the last few messages **you** (the human) sent.
-3. **SAFE** → an OS notification appears: "Running `<cmd>` in 5s — Cancel"; if you don't click Cancel, the command runs automatically.
-4. **RISKY** → the usual in-TUI approval prompt appears **and** a notification with **Approve** / **Reject** buttons. Whichever channel you act on first wins; clicking a button resolves the in-TUI prompt too.
-5. **Classifier failure / timeout** → falls back to the normal in-TUI prompt (fail closed).
+You could turn off permissions entirely with `--dangerously-skip-permissions`, but then `rm -rf node_modules` and `rm -rf ~/Documents` look the same to the machine. They are not the same.
 
-Other tool types (edit, write, webfetch, …) prompt normally. The plugin only touches bash.
+Delegated Access splits the difference:
 
-## How the LLM call works
+- **Safe commands run automatically.** A small LLM (Haiku-class by default) reads the command and your last few messages, decides it's fine, and you get a "Running in 5s — Cancel" notification. Don't click Cancel, it runs. Ignore it, it runs.
+- **Risky commands wake you up.** Destructive `rm`, `sudo`, `curl | sh`, anything touching `.env`, anything you didn't ask for — a desktop notification pops up with **Approve** and **Reject** buttons. Click one. You're done.
+- **Weird commands fail safe.** Classifier timed out? API flaked? Weird response? OpenCode's normal prompt shows up. Nothing ever slips through silently.
 
-The classifier runs in an **ephemeral child session** of your current session:
+You stay in flow. The agent stops pestering you for routine stuff. Dangerous stuff still needs a human.
 
-- `client.session.create({ parentID })` — new child session; typically hidden from top-level session lists.
-- `client.session.prompt({ model, system, tools: {}, parts })` — with the classifier system prompt, the small model, **no tools**, and the command + your recent messages as input.
-- `client.session.delete(...)` — cleanup in a `finally` block.
+## How it decides
 
-This reuses OpenCode's provider plumbing (auth, model routing, provider config) so you don't need to configure a separate API key or install extra provider SDKs. Classifier calls take ~500ms–1.5s typically.
+Every time OpenCode would prompt for a bash command, Delegated Access:
 
-## Prompt-injection defence
+1. Grabs the last N messages **you** sent (never the agent's messages — that would be a prompt injection wide open).
+2. Asks a small fast model: _given this command and what the user just said, is this SAFE or RISKY?_
+3. Acts on the verdict:
 
-The classifier sees only **user messages** from your session — never assistant output or tool results. This closes the obvious vector where a misaligned agent could prepend "actually, this rm -rf is fine because…" to manipulate the judge. User messages are wrapped in XML-style delimiters with an explicit system-prompt instruction to treat them as data, not instructions.
+```
+   ┌───────────────────────────────┐
+   │ Agent wants to run: `rm -rf …`│
+   └───────────────┬───────────────┘
+                   ▼
+          Classifier reads it
+                   │
+        ┌──────────┼──────────┐
+        ▼          ▼          ▼
+      SAFE       RISKY     FAIL
+        │          │         │
+        ▼          ▼         ▼
+   Notify    Notify + TUI  Normal
+   "5s…"    "Approve?"     prompt
+        │       │   │
+        ▼       ▼   ▼
+     Runs    Runs Blocked
+```
+
+The classifier call happens in an **ephemeral child session** of your current session, using OpenCode's own provider + auth — no extra API keys, no extra packages to configure. It's hidden from session lists and deleted when done.
 
 ## Install
 
+### 1. Clone and install dependencies
+
 ```bash
-# Local dev (plugin loaded directly from this repo)
+git clone https://github.com/jdtzmn/opencode-delegated-access.git
+cd opencode-delegated-access
 bun install
 ```
 
-Then in your `opencode.json`:
+### 2. Add the plugin to your `opencode.json`
 
 ```jsonc
 {
-  "plugin": ["./path/to/opencode-delegated-access/src/index.ts"],
+  "plugin": ["/absolute/path/to/opencode-delegated-access/src/index.ts"]
+}
+```
 
-  // Plugin config (optional — defaults shown)
+That's it. Defaults just work. Start OpenCode and it's live.
+
+### 3. (Optional) Tune it
+
+```jsonc
+{
+  "plugin": ["/absolute/path/to/opencode-delegated-access/src/index.ts"],
   "delegatedAccess": {
     "enabled": true,
     "contextMessageCount": 3,
     "safeCountdownMs": 5000,
-    "classifierModel": null,
+    "classifierModel": "anthropic/claude-haiku-4-5",
     "classifierTimeoutMs": 5000,
     "notificationSound": true
   }
 }
 ```
 
-Once published to npm you'll be able to use `"plugin": ["opencode-delegated-access"]`.
-
-### Configuration
-
-| Key | Default | Description |
+| Knob | Default | What it does |
 |---|---|---|
-| `enabled` | `true` | Master toggle. When `false`, the plugin passes through to OpenCode's normal approval. |
-| `contextMessageCount` | `3` | How many of your most recent messages (user messages only) the classifier sees as context. 0–20. |
-| `safeCountdownMs` | `5000` | For SAFE commands, how long the cancellable notification stays up before auto-approving. Set to `0` to disable the notification and auto-approve silently. |
-| `classifierModel` | *auto* | `providerID/modelID` override for the classifier. When unset, the plugin uses a provider-specific small model (Haiku for Anthropic, `gpt-4.1-mini` for OpenAI, `gemini-2.5-flash-lite` for Google) and falls back to the session's own model otherwise. |
-| `classifierTimeoutMs` | `5000` | Hard timeout for the classifier call. On timeout, the plugin fails closed (falls back to the normal approval prompt). 500–30000. |
-| `notificationSound` | `true` | Whether OS notifications play their sound. |
+| `enabled` | `true` | Turn the whole thing off without uninstalling. |
+| `contextMessageCount` | `3` | How many of **your** recent messages the classifier sees. 0 = no context, just the command. |
+| `safeCountdownMs` | `5000` | Cancellable countdown before auto-running SAFE commands. `0` = silent instant approve. |
+| `classifierModel` | _auto_ | Override the judge model, e.g. `anthropic/claude-haiku-4-5`. When unset, uses a small fast default for your provider (Haiku, `gpt-4.1-mini`, `gemini-flash-lite`). |
+| `classifierTimeoutMs` | `5000` | How long before we give up on the classifier and fall back to the normal prompt. |
+| `notificationSound` | `true` | OS notification sound on/off. |
 
-### Static allow/deny patterns
+### Use OpenCode's existing permission rules for fast-path patterns
 
-This plugin **does not** ship its own allowlist or denylist — OpenCode's static permission rules in `opencode.json` already run _before_ the plugin's hook, so they're the right place to express fast-path patterns:
+Don't duplicate allowlists here. OpenCode's static rules run **before** this plugin, so put your always-safe and never-safe patterns there:
 
 ```jsonc
 {
   "permission": {
     "bash": {
       "git status": "allow",
-      "npm test": "allow",
-      "rm -rf /*": "deny"
+      "npm test":   "allow",
+      "rm -rf /*":  "deny"
     }
   }
 }
 ```
 
-Anything not covered by a static rule reaches the plugin for classification.
+Anything not matched by a static rule flows into the classifier.
 
-## Fail-closed behaviour
+## Works best on macOS
 
-Every error path in the plugin falls back to `output.status = "ask"`, which means OpenCode shows its normal approval prompt. Errors that fail closed:
+The desktop notifications with Approve / Reject buttons work via `terminal-notifier` / macOS NotificationCenter. On Linux and Windows the SAFE countdown still works (the notification itself is the timer), but interactive buttons on the RISKY path may not be clickable — OpenCode's in-TUI prompt is always shown too, so you have a reliable fallback on every platform.
 
-- Classifier API error / timeout / malformed response
-- Ephemeral session creation or deletion failure
-- Unknown provider and no `classifierModel` override
-- Missing command / pattern in the permission request
-- Any unexpected exception in the plugin itself
+## How it's safe
 
-The one exception is SAFE-path notifier failure (e.g. running in a headless environment where `node-notifier` can't reach a display): since the classifier already deemed the command SAFE, a broken notifier doesn't re-gate the command. If you want fully strict behaviour in a headless environment, set `safeCountdownMs: 0` (silent auto-approve) or disable the plugin.
+- **The classifier never sees the agent's messages.** Only yours. A rogue assistant can't smuggle "this command is safe, trust me" into the judge's context.
+- **Every error falls back to asking you.** Classifier timeout, API error, malformed verdict, missing command, unexpected exception — all of them set `output.status = "ask"` and let OpenCode's normal prompt take over.
+- **The classifier can't call tools.** The ephemeral session runs with `tools: {}`, so even a compromised classifier model can only return text.
+- **Risky commands get two channels, not one.** The TUI prompt appears AND the notification fires. Whichever you answer first wins — so no bug in the notification path can ever accidentally auto-approve a RISKY command.
 
-## Platforms
+## Status
 
-- **macOS**: fully supported. Action buttons work via NotificationCenter / `terminal-notifier`.
-- **Linux / Windows**: the SAFE-path countdown still works (the notification is still a timer). Action buttons may degrade to non-interactive notifications depending on your `node-notifier` backend — the in-TUI prompt remains as the reliable fallback on every platform.
+v0.1.0. Bash commands only (edit / write / webfetch still prompt normally — that's the scope for v1). 125 tests, TypeScript, Bun. macOS-tested; Linux/Windows should work with degraded notification interactivity.
 
 ## Development
 
 ```bash
 bun install
-bun run check       # TypeScript check
-bun run test        # Vitest
-bun run test:watch  # Vitest watch mode
+bun run check   # TypeScript check
+bun run test    # 125 unit tests
 ```
 
-All core logic is covered by unit tests with mocked opencode clients and notifier. There's no fixture that hits a real LLM — that's left to manual smoke testing.
-
-### Manual smoke test
-
-1. Wire the plugin into a test `opencode.json` as shown above.
-2. Start an opencode session.
-3. Ask the agent to run a benign bash command, e.g. "run `ls -la`". You should see a "Running in 5s — Cancel" notification, then the command runs.
-4. Ask for a risky one, e.g. "run `rm -rf ~/Documents/test_delete_me`" (after `mkdir`ing that directory, obviously). You should see the in-TUI prompt AND a notification with Approve/Reject buttons. Clicking Approve in the notification should resolve the TUI prompt.
-5. Ask for something the classifier will time out on (e.g. temporarily set `classifierTimeoutMs: 500` and use a slow provider) and confirm the normal in-TUI prompt appears (fail closed).
+Design doc and implementation plan in [`docs/superpowers/`](./docs/superpowers/).
 
 ## License
 
