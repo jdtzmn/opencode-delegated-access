@@ -38,36 +38,50 @@ export type HandlerContext = {
 }
 
 /**
- * React to a single `permission.asked` event.
+ * Output object shape for the `permission.ask` hook. If provided, setting
+ * `.status = "allow"` here auto-approves the permission BEFORE opencode
+ * shows its TUI prompt (true pre-ask interception).
  *
- * opencode 1.4.x does not dispatch the `permission.ask` hook declared in the
- * plugin SDK types — its runtime emits the `permission.asked` event AFTER a
- * permission has already been queued and the TUI prompt has started
- * displaying. To intercept, we listen to this event and use
- * `client.postSessionIdPermissionsPermissionId` to resolve the permission
- * programmatically. This dismisses the TUI prompt and lets the command
- * proceed (or denies it).
+ * For the `event` and `"permission.updated"` hooks the permission has
+ * already been queued and the TUI prompt is already on-screen — in those
+ * cases `output` is undefined and we resolve via the SDK respond endpoint.
+ */
+export type HandlerOutput = { status: "ask" | "deny" | "allow" }
+
+/**
+ * React to a permission request from opencode.
  *
- * Consequence: the TUI prompt BRIEFLY appears for SAFE commands before being
- * auto-dismissed. This is a limitation of the runtime, not the design. See
- * the design spec for rationale.
+ * This function is dispatched from three possible hooks for compatibility:
+ *
+ *   - `permission.ask` (typed in SDK; rarely dispatched by the 1.4.x runtime
+ *     today — we register it defensively for forward-compat). When fired
+ *     with `output`, setting `output.status = "allow"` pre-empts the TUI
+ *     prompt entirely — no flash.
+ *   - `permission.updated` (fires reliably on 1.4.x; what notification.js
+ *     uses). No `output`; we resolve via the SDK respond endpoint after the
+ *     TUI prompt is already showing. User sees a brief flash.
+ *   - `event` hook filtered to `permission.asked` / `permission.updated`
+ *     types (belt-and-suspenders). Same as `permission.updated` semantics.
+ *
+ * Shared dedupe (via `ctx`'s caller) ensures each permissionID is handled
+ * exactly once regardless of how many hooks fire for it.
  *
  * Flow:
- *   - Disabled / non-bash type / no command → do nothing (TUI prompt stays,
- *     user decides manually).
+ *   - Disabled / non-bash type / no command / no model → do nothing (TUI
+ *     prompt stays, user decides manually).
  *   - Classifier failure → same.
- *   - SAFE → countdown notification; on "allow" outcome, call SDK with
- *     `response: "once"` to auto-approve.
+ *   - SAFE → countdown notification; on "allow" outcome, set
+ *     `output.status` (if available) OR call the SDK respond endpoint.
  *   - RISKY → kick off risky-path notification (Approve/Reject buttons);
  *     button clicks resolve the permission via the SDK.
- *
- * Returns when all SAFE-path awaited work is done; RISKY-path work is
- * fire-and-forget.
  */
 export async function handlePermissionEvent(
   permission: Permission,
   ctx: HandlerContext,
+  opts: { hookName: string; output?: HandlerOutput } = { hookName: "unknown" },
 ): Promise<void> {
+  const { hookName, output } = opts
+
   // Disabled → let opencode's normal approval machinery handle it.
   if (!ctx.config.enabled) return
 
@@ -86,6 +100,10 @@ export async function handlePermissionEvent(
   })
   if (!model) return
 
+  console.error(
+    `${LOG_PREFIX} classifying via ${hookName} cmd=${JSON.stringify(command)}`,
+  )
+
   // Fetch the last K user messages for the classifier's context.
   let userMessages: string[]
   try {
@@ -94,7 +112,10 @@ export async function handlePermissionEvent(
       permission.sessionID,
       ctx.config.contextMessageCount,
     )
-  } catch {
+  } catch (e) {
+    console.error(
+      `${LOG_PREFIX} getLastUserMessages failed: ${e instanceof Error ? e.message : String(e)}`,
+    )
     return
   }
 
@@ -131,7 +152,13 @@ export async function handlePermissionEvent(
     })
     if (decision === "allow") {
       console.error(`${LOG_PREFIX} auto-approving ${JSON.stringify(command)}`)
-      await respondToPermission(ctx.client, permission, "once")
+      // Prefer pre-ask output mutation when the hook supports it (avoids
+      // the TUI flash); otherwise fall back to the SDK respond endpoint.
+      if (output) {
+        output.status = "allow"
+      } else {
+        await respondToPermission(ctx.client, permission, "once")
+      }
     } else {
       console.error(
         `${LOG_PREFIX} user cancelled auto-approval; TUI prompt remains`,
@@ -143,6 +170,10 @@ export async function handlePermissionEvent(
   // RISKY: kick off the notification with Approve/Reject buttons. The
   // notification resolves via the SDK on button click; if the user
   // answers in the TUI first, the notification is a no-op.
+  //
+  // For the pre-ask (permission.ask) hook path, we explicitly leave
+  // output.status as-is ("ask") so opencode proceeds to show the normal
+  // TUI prompt — the notification runs alongside it.
   void runRiskyPathInBackground({
     client: ctx.client,
     sessionID: permission.sessionID,
@@ -175,8 +206,11 @@ async function respondToPermission(
       path: { id: permission.sessionID, permissionID: permission.id },
       body: { response },
     })
-  } catch {
+  } catch (e) {
     // TUI prompt still live as fallback.
+    console.error(
+      `${LOG_PREFIX} respondToPermission failed: ${e instanceof Error ? e.message : String(e)}`,
+    )
   }
 }
 

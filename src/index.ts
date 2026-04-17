@@ -1,32 +1,33 @@
 import type { Plugin } from "@opencode-ai/plugin"
+import type { Permission } from "@opencode-ai/sdk"
 import { parseConfig, type DelegatedAccessConfig } from "./config.ts"
 import {
   handlePermissionEvent,
   type HandlerContext,
+  type HandlerOutput,
 } from "./permission/handler.ts"
 import type { ModelRef } from "./classifier/model.ts"
 
 /**
  * OpenCode plugin entry point.
  *
- * Listens on the generic `event` hook for `permission.asked` events.
- * opencode 1.4.x does NOT dispatch the `permission.ask` hook declared in the
- * plugin SDK types (it's declared but unwired in the compiled runtime), so
- * the event-driven path is the only reliable attach point. Consequence: the
- * TUI prompt briefly appears for SAFE commands before we auto-dismiss it via
- * the permission-respond SDK endpoint.
+ * We register THREE permission-related hooks as a "shotgun" strategy for
+ * maximum compatibility with opencode's evolving plugin runtime:
+ *
+ *   1. `permission.ask` — typed in the SDK. If opencode dispatches it,
+ *      this hook gets `output.status` and can pre-empt the TUI prompt
+ *      entirely (no flash). Forward-compat for future opencode releases.
+ *   2. `permission.updated` — the hook notification.js uses successfully
+ *      on 1.4.x. Fires reliably after the TUI prompt is already shown.
+ *   3. `event` filtered to `permission.asked` / `permission.updated` —
+ *      belt-and-suspenders in case the above two both fail to dispatch.
+ *
+ * A shared `handledPermissionIDs` set dedupes across all three hooks so
+ * each permission is classified exactly once regardless of how many hooks
+ * fire for it.
  *
  * Plugin config: opencode.json → top-level `delegatedAccess` object. Any
  * shape mismatch is ignored; defaults fill in.
- *
- * Example:
- *   {
- *     "delegatedAccess": {
- *       "enabled": true,
- *       "contextMessageCount": 3,
- *       "classifierModel": "anthropic/claude-haiku-4-5"
- *     }
- *   }
  */
 const LOG_PREFIX = "[delegated-access]"
 
@@ -42,15 +43,14 @@ const DelegatedAccess: Plugin = async ({ client }) => {
   // on every `config` call so it stays in sync when the user changes models.
   let sessionModel: ModelRef | undefined
 
-  // Track IDs of ephemeral classifier sessions we create. The `event` hook
-  // skips `permission.asked` events whose `sessionID` is in this set, so the
-  // classifier can't trigger itself (defense-in-depth — the classifier runs
-  // with `tools: {}` so in practice it can't request permissions).
+  // Track IDs of ephemeral classifier sessions we create. All permission
+  // hooks skip events whose `sessionID` is in this set, so the classifier
+  // can't trigger itself (defense-in-depth — the classifier runs with
+  // `tools: {}` and shouldn't request permissions).
   const ephemeralSessionIDs = new Set<string>()
 
-  // Permissions we've already handled, to avoid re-processing if opencode
-  // emits multiple events per permission (e.g. both `permission.asked` and
-  // `permission.updated` for the same permissionID).
+  // Permissions we've already handled, shared across all three hooks so
+  // each permissionID is classified once no matter which hook(s) fire.
   const handledPermissionIDs = new Set<string>()
 
   // Upper bound on the dedupe set so it can't grow unbounded in a long
@@ -67,6 +67,48 @@ const DelegatedAccess: Plugin = async ({ client }) => {
         handledPermissionIDs.delete(id)
         i++
       }
+    }
+  }
+
+  function buildCtx(): HandlerContext {
+    return { client, config, sessionModel, ephemeralSessionIDs }
+  }
+
+  /**
+   * Common dispatch: validate the permission, dedupe, log, call the
+   * handler. All three hook paths share this flow.
+   */
+  async function dispatch(
+    hookName: string,
+    permission: Permission | undefined | null,
+    output?: HandlerOutput,
+  ): Promise<void> {
+    if (!permission || typeof permission.id !== "string") {
+      // Nothing to process — some hook-input shapes may not carry a full
+      // Permission. Silently return; other hooks will cover it.
+      return
+    }
+
+    // Loop-guard: skip events from our own ephemeral classifier sessions.
+    if (ephemeralSessionIDs.has(permission.sessionID)) return
+
+    // Dedupe: only handle each permission once across all hooks.
+    if (handledPermissionIDs.has(permission.id)) return
+    rememberHandled(permission.id)
+
+    console.error(
+      `${LOG_PREFIX} ${hookName} fired id=${permission.id} type=${permission.type} pattern=${JSON.stringify(permission.pattern)}`,
+    )
+
+    try {
+      await handlePermissionEvent(permission, buildCtx(), {
+        hookName,
+        ...(output !== undefined ? { output } : {}),
+      })
+    } catch (e) {
+      console.error(
+        `${LOG_PREFIX} ${hookName} handler threw: ${e instanceof Error ? e.message : String(e)}`,
+      )
     }
   }
 
@@ -91,50 +133,69 @@ const DelegatedAccess: Plugin = async ({ client }) => {
         parseModelString(input.model) ?? parseModelString(input.small_model)
     },
 
+    // Path 1: typed permission.ask hook. If opencode dispatches this, we
+    // can set output.status = "allow" to pre-empt the TUI prompt.
+    "permission.ask": async (input, output) => {
+      // `input` is the Permission directly (per SDK type declaration).
+      await dispatch("permission.ask", input, output)
+    },
+
+    // Path 2: permission.updated hook. notification.js uses this path
+    // successfully on 1.4.x. Input shape is not formally typed in the SDK;
+    // probe defensively below.
+    //
+    // This hook is registered via a direct string key since @opencode-ai/
+    // plugin's Hooks type doesn't declare it.
+    ...({
+      "permission.updated": async (input: unknown) => {
+        const permission = extractPermission(input)
+        await dispatch("permission.updated", permission)
+      },
+    } as Record<string, (input: unknown) => Promise<void>>),
+
+    // Path 3: generic event hook. Filter to permission.asked /
+    // permission.updated event types.
     event: async ({ event }) => {
-      // We handle both "permission.asked" (emitted by opencode 1.4.x but
-      // not declared in the SDK's Event union — we compare it as a plain
-      // string) and "permission.updated" (typed in the SDK; fired when a
-      // permission's state changes). The permissionID dedupe set ensures
-      // we only classify each permission once.
       const type: string = event.type
       if (type !== "permission.asked" && type !== "permission.updated") return
 
-      // Both event variants carry a Permission in `properties`.
-      const permission = (event as unknown as {
-        properties: import("@opencode-ai/sdk").Permission
-      }).properties
-      if (!permission || typeof permission.id !== "string") return
-
-      // Loop-guard: skip events from our own ephemeral classifier sessions.
-      if (ephemeralSessionIDs.has(permission.sessionID)) return
-
-      // Dedupe: only handle each permission once.
-      if (handledPermissionIDs.has(permission.id)) return
-      rememberHandled(permission.id)
-
-      console.error(
-        `${LOG_PREFIX} ${type} ${permission.type} id=${permission.id} pattern=${JSON.stringify(permission.pattern)}`,
-      )
-
-      const ctx: HandlerContext = {
-        client,
-        config,
-        sessionModel,
-        ephemeralSessionIDs,
-      }
-
-      try {
-        await handlePermissionEvent(permission, ctx)
-      } catch (e) {
-        // Defensive catch-all: any unexpected error in our code must not
-        // crash the session. The TUI prompt remains as a fallback.
-        console.error(
-          `${LOG_PREFIX} handler threw: ${e instanceof Error ? e.message : String(e)}`,
-        )
-      }
+      const permission = extractPermission(event)
+      await dispatch(`event:${type}`, permission)
     },
   }
+}
+
+/**
+ * Defensively extract a `Permission` from whatever shape opencode hands
+ * our hooks. Different hooks (and possibly different opencode versions)
+ * send different shapes; we probe the common locations:
+ *
+ *   - `input` itself is a Permission (typed hook path)
+ *   - `input.permission` (possible nested shape)
+ *   - `input.properties` (event-hook shape: `{ type, properties: Permission }`)
+ *   - `input.event.properties` (nested event wrapping)
+ *
+ * Returns `null` if nothing resembling a Permission is found.
+ */
+function extractPermission(input: unknown): Permission | null {
+  if (!input || typeof input !== "object") return null
+  const candidates: unknown[] = [
+    input,
+    (input as { permission?: unknown }).permission,
+    (input as { properties?: unknown }).properties,
+    (input as { event?: { properties?: unknown } }).event?.properties,
+  ]
+  for (const c of candidates) {
+    if (
+      c &&
+      typeof c === "object" &&
+      typeof (c as { id?: unknown }).id === "string" &&
+      typeof (c as { sessionID?: unknown }).sessionID === "string"
+    ) {
+      return c as Permission
+    }
+  }
+  return null
 }
 
 /**

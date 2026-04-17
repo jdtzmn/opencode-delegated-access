@@ -295,4 +295,83 @@ describe("handlePermissionEvent", () => {
     ).resolves.toBeUndefined()
     expect(respondCall).toHaveBeenCalledTimes(1)
   })
+
+  // --- pre-ask interception path (permission.ask hook with output) -------
+
+  it("when output is provided and verdict is SAFE-allow, sets output.status='allow' instead of calling SDK", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx, respondCall } = buildCtx()
+    const output = { status: "ask" as "ask" | "allow" | "deny" }
+    await handlePermissionEvent(basePermission(), ctx, {
+      hookName: "permission.ask",
+      output,
+    })
+
+    expect(output.status).toBe("allow")
+    expect(respondCall).not.toHaveBeenCalled()
+  })
+
+  it("when output is provided and verdict is SAFE but user cancels, leaves output.status='ask'", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("ask")
+
+    const { ctx, respondCall } = buildCtx()
+    const output = { status: "ask" as "ask" | "allow" | "deny" }
+    await handlePermissionEvent(basePermission(), ctx, {
+      hookName: "permission.ask",
+      output,
+    })
+
+    expect(output.status).toBe("ask")
+    expect(respondCall).not.toHaveBeenCalled()
+  })
+
+  it("when output is provided and verdict is RISKY, leaves output.status='ask' and kicks off risky path", async () => {
+    mockedClassify.mockResolvedValueOnce({
+      verdict: "RISKY",
+      reason: "destructive",
+    })
+    mockedRisky.mockResolvedValue(undefined)
+
+    const { ctx, respondCall } = buildCtx()
+    const output = { status: "ask" as "ask" | "allow" | "deny" }
+    await handlePermissionEvent(
+      basePermission({ pattern: "rm -rf /" }),
+      ctx,
+      { hookName: "permission.ask", output },
+    )
+
+    // TUI prompt should still be shown; notification runs alongside.
+    expect(output.status).toBe("ask")
+    expect(mockedRisky).toHaveBeenCalledTimes(1)
+    expect(respondCall).not.toHaveBeenCalled()
+  })
+
+  it("when output is provided and classifier fails, leaves output.status='ask' (fail closed)", async () => {
+    mockedClassify.mockResolvedValueOnce(null)
+
+    const { ctx, respondCall } = buildCtx()
+    const output = { status: "ask" as "ask" | "allow" | "deny" }
+    await handlePermissionEvent(basePermission(), ctx, {
+      hookName: "permission.ask",
+      output,
+    })
+
+    expect(output.status).toBe("ask")
+    expect(respondCall).not.toHaveBeenCalled()
+  })
+
+  it("calls SDK when output is NOT provided (permission.updated / event paths)", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(basePermission(), ctx, {
+      hookName: "permission.updated",
+    })
+
+    expect(respondCall).toHaveBeenCalledTimes(1)
+  })
 })
