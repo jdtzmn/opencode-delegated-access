@@ -1,28 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 
-// Mock the child modules so we can assert on wiring without running real
-// notifications or LLM calls.
 vi.mock("./permission/handler.ts", () => ({
-  handlePermission: vi.fn(),
+  handlePermissionEvent: vi.fn(),
 }))
 
 import DelegatedAccess from "./index.ts"
-import { handlePermission } from "./permission/handler.ts"
+import { handlePermissionEvent } from "./permission/handler.ts"
 
-const mockedHandle = vi.mocked(handlePermission)
+const mockedHandle = vi.mocked(handlePermissionEvent)
 
 beforeEach(() => {
   mockedHandle.mockReset()
   mockedHandle.mockImplementation(async () => {
-    // Default: do nothing to output.
+    // Default: do nothing.
   })
 })
 
-async function makePluginHooks(overrides: {
-  client?: unknown
-} = {}) {
+async function makePluginHooks() {
   const pluginInput = {
-    client: overrides.client ?? ({} as unknown),
+    client: {} as unknown,
     project: {} as unknown,
     directory: "/tmp",
     worktree: "/tmp",
@@ -32,41 +28,137 @@ async function makePluginHooks(overrides: {
   return DelegatedAccess(pluginInput as never)
 }
 
+function makePermissionEvent(overrides: {
+  type?: string
+  id?: string
+  sessionID?: string
+  permissionType?: string
+  pattern?: string | string[]
+} = {}) {
+  return {
+    event: {
+      type: overrides.type ?? "permission.asked",
+      properties: {
+        id: overrides.id ?? "perm_1",
+        type: overrides.permissionType ?? "bash",
+        pattern: overrides.pattern ?? "ls",
+        sessionID: overrides.sessionID ?? "sess_main",
+        messageID: "msg_1",
+        title: "t",
+        metadata: {},
+        time: { created: 0 },
+      },
+    },
+  } as never
+}
+
 describe("DelegatedAccess plugin entry", () => {
-  it("returns hooks with config + permission.ask registered", async () => {
+  it("registers the `config` and `event` hooks (not `permission.ask`)", async () => {
     const hooks = await makePluginHooks()
     expect(typeof hooks.config).toBe("function")
-    expect(typeof hooks["permission.ask"]).toBe("function")
+    expect(typeof hooks.event).toBe("function")
+    expect(hooks["permission.ask" as keyof typeof hooks]).toBeUndefined()
   })
 
-  it("uses defaults when no config is supplied (no config hook invocation)", async () => {
+  it("calls handlePermissionEvent for permission.asked events", async () => {
+    const hooks = await makePluginHooks()
+    await hooks.event!(makePermissionEvent({ type: "permission.asked" }))
+    expect(mockedHandle).toHaveBeenCalledTimes(1)
+    const [permission, ctx] = mockedHandle.mock.calls[0] ?? []
+    expect(permission?.id).toBe("perm_1")
+    expect(ctx?.config.enabled).toBe(true) // defaults
+  })
+
+  it("calls handlePermissionEvent for permission.updated events", async () => {
+    const hooks = await makePluginHooks()
+    await hooks.event!(
+      makePermissionEvent({ type: "permission.updated", id: "perm_u" }),
+    )
+    expect(mockedHandle).toHaveBeenCalledTimes(1)
+  })
+
+  it("ignores events of unrelated types", async () => {
+    const hooks = await makePluginHooks()
+    await hooks.event!({
+      event: { type: "session.idle", properties: {} },
+    } as never)
+    await hooks.event!({
+      event: { type: "chat.message", properties: {} },
+    } as never)
+    expect(mockedHandle).not.toHaveBeenCalled()
+  })
+
+  it("dedupes: the same permission ID is only handled once across asked+updated", async () => {
+    const hooks = await makePluginHooks()
+    await hooks.event!(
+      makePermissionEvent({ type: "permission.asked", id: "perm_dedupe" }),
+    )
+    await hooks.event!(
+      makePermissionEvent({ type: "permission.updated", id: "perm_dedupe" }),
+    )
+    await hooks.event!(
+      makePermissionEvent({ type: "permission.asked", id: "perm_dedupe" }),
+    )
+    expect(mockedHandle).toHaveBeenCalledTimes(1)
+  })
+
+  it("skips permission events whose sessionID is an ephemeral classifier session", async () => {
     const hooks = await makePluginHooks()
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    const input = {
-      id: "perm",
-      type: "bash",
-      pattern: "ls",
-      sessionID: "s",
-      messageID: "m",
-      title: "t",
-      metadata: {},
-      time: { created: 0 },
-    } as never
+    // Simulate a classifier session running: register its ID via the first
+    // invocation's HandlerContext, then emit a permission event from that
+    // session and verify we skip it.
+    let registeredCtx: {
+      ephemeralSessionIDs: Set<string>
+    } | undefined
+    mockedHandle.mockImplementationOnce(async (_perm, ctx) => {
+      registeredCtx = ctx
+      ctx.ephemeralSessionIDs.add("sess_classifier")
+    })
 
-    await hooks["permission.ask"]!(input, output)
+    // First event: normal session; handler runs and registers "sess_classifier".
+    await hooks.event!(
+      makePermissionEvent({
+        type: "permission.asked",
+        id: "perm_first",
+        sessionID: "sess_main",
+      }),
+    )
+    expect(registeredCtx?.ephemeralSessionIDs.has("sess_classifier")).toBe(true)
 
-    expect(mockedHandle).toHaveBeenCalledTimes(1)
-    const ctx = mockedHandle.mock.calls[0]?.[2]
-    // Default config.enabled is true.
+    // Second event: FROM the classifier session — must be skipped.
+    await hooks.event!(
+      makePermissionEvent({
+        type: "permission.asked",
+        id: "perm_from_classifier",
+        sessionID: "sess_classifier",
+      }),
+    )
+    expect(mockedHandle).toHaveBeenCalledTimes(1) // still 1
+  })
+
+  it("ignores events whose properties are missing a permission ID", async () => {
+    const hooks = await makePluginHooks()
+    await hooks.event!({
+      event: { type: "permission.asked", properties: {} },
+    } as never)
+    await hooks.event!({
+      event: { type: "permission.asked", properties: { id: 123 } },
+    } as never)
+    expect(mockedHandle).not.toHaveBeenCalled()
+  })
+
+  it("uses defaults when no config is supplied", async () => {
+    const hooks = await makePluginHooks()
+    await hooks.event!(makePermissionEvent())
+
+    const ctx = mockedHandle.mock.calls[0]?.[1]
     expect(ctx?.config.enabled).toBe(true)
-    // sessionModel undefined because config hook never ran.
     expect(ctx?.sessionModel).toBeUndefined()
   })
 
   it("latches plugin config from the delegatedAccess key in opencode config", async () => {
     const hooks = await makePluginHooks()
-
     await hooks.config!({
       delegatedAccess: {
         enabled: false,
@@ -74,70 +166,31 @@ describe("DelegatedAccess plugin entry", () => {
       },
     } as never)
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    const input = {
-      id: "perm",
-      type: "bash",
-      pattern: "ls",
-      sessionID: "s",
-      messageID: "m",
-      title: "t",
-      metadata: {},
-      time: { created: 0 },
-    } as never
-
-    await hooks["permission.ask"]!(input, output)
-    const ctx = mockedHandle.mock.calls[0]?.[2]
+    await hooks.event!(makePermissionEvent())
+    const ctx = mockedHandle.mock.calls[0]?.[1]
     expect(ctx?.config.enabled).toBe(false)
     expect(ctx?.config.contextMessageCount).toBe(5)
   })
 
-  it("falls back to defaults when plugin config is invalid (rather than crashing)", async () => {
+  it("falls back to defaults when plugin config is invalid", async () => {
     const hooks = await makePluginHooks()
-
     await hooks.config!({
       delegatedAccess: { enabled: "not a boolean" },
     } as never)
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    const input = {
-      id: "perm",
-      type: "bash",
-      pattern: "ls",
-      sessionID: "s",
-      messageID: "m",
-      title: "t",
-      metadata: {},
-      time: { created: 0 },
-    } as never
-
-    await hooks["permission.ask"]!(input, output)
-    const ctx = mockedHandle.mock.calls[0]?.[2]
-    // Should have reverted to defaults.
-    expect(ctx?.config.enabled).toBe(true)
+    await hooks.event!(makePermissionEvent())
+    const ctx = mockedHandle.mock.calls[0]?.[1]
+    expect(ctx?.config.enabled).toBe(true) // default restored
   })
 
-  it("parses the session's default model from the config.model field", async () => {
+  it("parses the session's default model from config.model", async () => {
     const hooks = await makePluginHooks()
-
     await hooks.config!({
       model: "anthropic/claude-sonnet-4-5",
     } as never)
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    const input = {
-      id: "perm",
-      type: "bash",
-      pattern: "ls",
-      sessionID: "s",
-      messageID: "m",
-      title: "t",
-      metadata: {},
-      time: { created: 0 },
-    } as never
-
-    await hooks["permission.ask"]!(input, output)
-    const ctx = mockedHandle.mock.calls[0]?.[2]
+    await hooks.event!(makePermissionEvent())
+    const ctx = mockedHandle.mock.calls[0]?.[1]
     expect(ctx?.sessionModel).toEqual({
       providerID: "anthropic",
       modelID: "claude-sonnet-4-5",
@@ -146,51 +199,25 @@ describe("DelegatedAccess plugin entry", () => {
 
   it("falls back to config.small_model if config.model is absent", async () => {
     const hooks = await makePluginHooks()
-
     await hooks.config!({
       small_model: "openai/gpt-4.1-mini",
     } as never)
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    const input = {
-      id: "perm",
-      type: "bash",
-      pattern: "ls",
-      sessionID: "s",
-      messageID: "m",
-      title: "t",
-      metadata: {},
-      time: { created: 0 },
-    } as never
-
-    await hooks["permission.ask"]!(input, output)
-    const ctx = mockedHandle.mock.calls[0]?.[2]
+    await hooks.event!(makePermissionEvent())
+    const ctx = mockedHandle.mock.calls[0]?.[1]
     expect(ctx?.sessionModel).toEqual({
       providerID: "openai",
       modelID: "gpt-4.1-mini",
     })
   })
 
-  it("swallows exceptions from handlePermission and sets output.status='ask'", async () => {
+  it("swallows exceptions from handlePermissionEvent", async () => {
     mockedHandle.mockImplementationOnce(async () => {
       throw new Error("unexpected boom")
     })
 
     const hooks = await makePluginHooks()
-    const output = { status: "allow" as "ask" | "allow" | "deny" }
-    const input = {
-      id: "perm",
-      type: "bash",
-      pattern: "ls",
-      sessionID: "s",
-      messageID: "m",
-      title: "t",
-      metadata: {},
-      time: { created: 0 },
-    } as never
-
     // Should not throw.
-    await hooks["permission.ask"]!(input, output)
-    expect(output.status).toBe("ask")
+    await expect(hooks.event!(makePermissionEvent())).resolves.toBeUndefined()
   })
 })

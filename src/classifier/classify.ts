@@ -35,8 +35,31 @@ export async function classifyCommand(args: {
   parentSessionID: string
   model: ModelRef
   timeoutMs: number
+  /**
+   * Called with the ephemeral classifier session's ID as soon as it's
+   * created. Callers can track these IDs to filter out downstream
+   * `permission.asked` events the classifier session itself might generate
+   * (defense-in-depth — the classifier uses `tools: {}` so in practice it
+   * can't request any permissions).
+   */
+  onEphemeralSessionCreated?: (id: string) => void
+  /**
+   * Called with the ephemeral session's ID after deletion completes (or
+   * fails — cleanup is best-effort). Callers should clear the session ID
+   * from their tracking set here.
+   */
+  onEphemeralSessionDeleted?: (id: string) => void
 }): Promise<Verdict | null> {
-  const { client, command, userMessages, parentSessionID, model, timeoutMs } = args
+  const {
+    client,
+    command,
+    userMessages,
+    parentSessionID,
+    model,
+    timeoutMs,
+    onEphemeralSessionCreated,
+    onEphemeralSessionDeleted,
+  } = args
 
   // Step 1: create ephemeral child session.
   let ephemeralID: string | undefined
@@ -52,6 +75,7 @@ export async function classifyCommand(args: {
     return null
   }
   if (!ephemeralID) return null
+  onEphemeralSessionCreated?.(ephemeralID)
 
   try {
     // Step 2: classifier prompt with timeout.
@@ -89,6 +113,7 @@ export async function classifyCommand(args: {
     } catch {
       // Swallow — cleanup must not affect the returned verdict.
     }
+    onEphemeralSessionDeleted?.(ephemeralID)
   }
 }
 

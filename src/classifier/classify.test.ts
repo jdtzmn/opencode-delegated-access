@@ -225,4 +225,66 @@ describe("classifyCommand", () => {
     const result = await classifyCommand({ ...baseArgs, client })
     expect(result?.verdict).toBe("SAFE")
   })
+
+  it("invokes onEphemeralSessionCreated and onEphemeralSessionDeleted around the classifier call", async () => {
+    const { client } = mockClient({})
+    const created = vi.fn()
+    const deleted = vi.fn()
+
+    await classifyCommand({
+      ...baseArgs,
+      client,
+      onEphemeralSessionCreated: created,
+      onEphemeralSessionDeleted: deleted,
+    })
+
+    expect(created).toHaveBeenCalledTimes(1)
+    expect(created).toHaveBeenCalledWith("sess_eph")
+    expect(deleted).toHaveBeenCalledTimes(1)
+    expect(deleted).toHaveBeenCalledWith("sess_eph")
+    // Order: created before deleted.
+    const createdOrder = created.mock.invocationCallOrder[0] ?? 0
+    const deletedOrder = deleted.mock.invocationCallOrder[0] ?? 0
+    expect(createdOrder).toBeLessThan(deletedOrder)
+  })
+
+  it("still invokes onEphemeralSessionDeleted when the prompt throws", async () => {
+    const { client } = mockClient({
+      prompt: async () => {
+        throw new Error("boom")
+      },
+    })
+    const created = vi.fn()
+    const deleted = vi.fn()
+
+    await classifyCommand({
+      ...baseArgs,
+      client,
+      onEphemeralSessionCreated: created,
+      onEphemeralSessionDeleted: deleted,
+    })
+
+    expect(created).toHaveBeenCalledTimes(1)
+    expect(deleted).toHaveBeenCalledTimes(1)
+  })
+
+  it("does NOT invoke onEphemeralSessionCreated when session.create fails", async () => {
+    const { client } = mockClient({
+      create: async () => {
+        throw new Error("cannot create")
+      },
+    })
+    const created = vi.fn()
+    const deleted = vi.fn()
+
+    await classifyCommand({
+      ...baseArgs,
+      client,
+      onEphemeralSessionCreated: created,
+      onEphemeralSessionDeleted: deleted,
+    })
+
+    expect(created).not.toHaveBeenCalled()
+    expect(deleted).not.toHaveBeenCalled()
+  })
 })

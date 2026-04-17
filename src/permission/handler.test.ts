@@ -17,13 +17,50 @@ import { classifyCommand } from "../classifier/classify.ts"
 import { getLastUserMessages } from "../ui/messages.ts"
 import { runSafePath } from "./safe-path.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
-import { handlePermission } from "./handler.ts"
+import { handlePermissionEvent } from "./handler.ts"
 import { DEFAULT_CONFIG } from "../config.ts"
 
 const mockedClassify = vi.mocked(classifyCommand)
 const mockedGetMsgs = vi.mocked(getLastUserMessages)
 const mockedSafe = vi.mocked(runSafePath)
 const mockedRisky = vi.mocked(runRiskyPathInBackground)
+
+/**
+ * Build a ctx whose client records calls to the permission-respond endpoint.
+ * Returns both the ctx and the recorded calls so tests can assert on them.
+ */
+function buildCtx(overrides: Partial<{
+  enabled: boolean
+  contextMessageCount: number
+  classifierModel: string
+  sessionModel: { providerID: string; modelID: string } | undefined
+  respondImpl: (opts: unknown) => Promise<unknown>
+}> = {}) {
+  const respondCall = vi.fn(
+    overrides.respondImpl ?? (async () => ({ data: true } as unknown)),
+  )
+  const ctx = {
+    client: {
+      postSessionIdPermissionsPermissionId: respondCall,
+    } as never,
+    config: {
+      ...DEFAULT_CONFIG,
+      ...(overrides.enabled !== undefined ? { enabled: overrides.enabled } : {}),
+      ...(overrides.contextMessageCount !== undefined
+        ? { contextMessageCount: overrides.contextMessageCount }
+        : {}),
+      ...(overrides.classifierModel !== undefined
+        ? { classifierModel: overrides.classifierModel }
+        : {}),
+    },
+    sessionModel:
+      "sessionModel" in overrides
+        ? overrides.sessionModel
+        : { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
+    ephemeralSessionIDs: new Set<string>(),
+  }
+  return { ctx, respondCall }
+}
 
 beforeEach(() => {
   mockedClassify.mockReset()
@@ -47,80 +84,71 @@ function basePermission(overrides: Record<string, unknown> = {}) {
   } as never
 }
 
-const baseCtx = {
-  client: {} as never,
-  config: DEFAULT_CONFIG,
-  sessionModel: { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
-}
-
-describe("handlePermission", () => {
-  it("is a no-op when config.enabled is false", async () => {
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(basePermission(), output, {
-      ...baseCtx,
-      config: { ...DEFAULT_CONFIG, enabled: false },
-    })
-    expect(output.status).toBe("ask")
+describe("handlePermissionEvent", () => {
+  it("does nothing when config.enabled is false", async () => {
+    const { ctx, respondCall } = buildCtx({ enabled: false })
+    await handlePermissionEvent(basePermission(), ctx)
     expect(mockedClassify).not.toHaveBeenCalled()
+    expect(respondCall).not.toHaveBeenCalled()
   })
 
-  it("is a no-op for non-bash tool types", async () => {
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(
-      basePermission({ type: "edit" }),
-      output,
-      baseCtx,
-    )
-    expect(output.status).toBe("ask")
+  it("does nothing for non-bash tool types", async () => {
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(basePermission({ type: "edit" }), ctx)
     expect(mockedClassify).not.toHaveBeenCalled()
+    expect(respondCall).not.toHaveBeenCalled()
   })
 
-  it("sets output.status='allow' when SAFE and the safe-path returns allow", async () => {
+  it("calls the SDK with response='once' when SAFE and safe-path returns allow", async () => {
     mockedClassify.mockResolvedValueOnce({
       verdict: "SAFE",
       reason: "read-only",
     })
     mockedSafe.mockResolvedValueOnce("allow")
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(basePermission(), output, baseCtx)
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(basePermission(), ctx)
 
-    expect(output.status).toBe("allow")
-    expect(mockedSafe).toHaveBeenCalledTimes(1)
+    expect(respondCall).toHaveBeenCalledTimes(1)
+    const args = respondCall.mock.calls[0]?.[0] as {
+      path: { id: string; permissionID: string }
+      body: { response: string }
+    }
+    expect(args.path).toEqual({ id: "sess_abc", permissionID: "perm_123" })
+    expect(args.body.response).toBe("once")
     expect(mockedRisky).not.toHaveBeenCalled()
   })
 
-  it("sets output.status='ask' when SAFE but user cancelled", async () => {
+  it("does NOT call the SDK when SAFE but user cancels (safe-path returns ask)", async () => {
     mockedClassify.mockResolvedValueOnce({
       verdict: "SAFE",
       reason: "read-only",
     })
     mockedSafe.mockResolvedValueOnce("ask")
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(basePermission(), output, baseCtx)
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(basePermission(), ctx)
 
-    expect(output.status).toBe("ask")
+    expect(respondCall).not.toHaveBeenCalled()
   })
 
-  it("sets output.status='ask' when RISKY and starts risky path in background", async () => {
+  it("starts the risky-path in background when verdict is RISKY", async () => {
     mockedClassify.mockResolvedValueOnce({
       verdict: "RISKY",
       reason: "destructive",
     })
     mockedRisky.mockResolvedValue(undefined)
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(
       basePermission({ pattern: "rm -rf /" }),
-      output,
-      baseCtx,
+      ctx,
     )
 
-    expect(output.status).toBe("ask")
+    // We don't call the SDK directly in the RISKY path; the risky-path
+    // function calls it on button click.
+    expect(respondCall).not.toHaveBeenCalled()
     expect(mockedRisky).toHaveBeenCalledTimes(1)
-    // The permission handler must return promptly. The risky path call is
-    // fire-and-forget; what we assert here is that it was scheduled.
     const args = mockedRisky.mock.calls[0]?.[0]
     expect(args?.sessionID).toBe("sess_abc")
     expect(args?.permissionID).toBe("perm_123")
@@ -128,25 +156,25 @@ describe("handlePermission", () => {
     expect(args?.reason).toBe("destructive")
   })
 
-  it("sets output.status='ask' when the classifier fails (returns null)", async () => {
+  it("does nothing when the classifier fails (returns null)", async () => {
     mockedClassify.mockResolvedValueOnce(null)
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(basePermission(), output, baseCtx)
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(basePermission(), ctx)
 
-    expect(output.status).toBe("ask")
+    expect(respondCall).not.toHaveBeenCalled()
     expect(mockedSafe).not.toHaveBeenCalled()
     expect(mockedRisky).not.toHaveBeenCalled()
   })
 
-  it("sets output.status='ask' when getLastUserMessages throws", async () => {
+  it("does nothing when getLastUserMessages throws", async () => {
     mockedGetMsgs.mockRejectedValueOnce(new Error("sdk explode"))
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(basePermission(), output, baseCtx)
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(basePermission(), ctx)
 
-    expect(output.status).toBe("ask")
     expect(mockedClassify).not.toHaveBeenCalled()
+    expect(respondCall).not.toHaveBeenCalled()
   })
 
   it("extracts command from a string pattern", async () => {
@@ -156,11 +184,10 @@ describe("handlePermission", () => {
     })
     mockedSafe.mockResolvedValueOnce("allow")
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(
       basePermission({ pattern: "echo hi" }),
-      output,
-      baseCtx,
+      ctx,
     )
 
     const args = mockedClassify.mock.calls[0]?.[0]
@@ -174,37 +201,32 @@ describe("handlePermission", () => {
     })
     mockedSafe.mockResolvedValueOnce("allow")
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(
       basePermission({ pattern: ["ls -la", "/fallback"] }),
-      output,
-      baseCtx,
+      ctx,
     )
 
     const args = mockedClassify.mock.calls[0]?.[0]
     expect(args?.command).toBe("ls -la")
   })
 
-  it("sets output.status='ask' when pattern is missing (no command to classify)", async () => {
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(
+  it("does nothing when pattern is missing (no command to classify)", async () => {
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(
       basePermission({ pattern: undefined }),
-      output,
-      baseCtx,
+      ctx,
     )
-    expect(output.status).toBe("ask")
     expect(mockedClassify).not.toHaveBeenCalled()
+    expect(respondCall).not.toHaveBeenCalled()
   })
 
   it("passes config.contextMessageCount to getLastUserMessages", async () => {
     mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
     mockedSafe.mockResolvedValueOnce("allow")
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(basePermission(), output, {
-      ...baseCtx,
-      config: { ...DEFAULT_CONFIG, contextMessageCount: 7 },
-    })
+    const { ctx } = buildCtx({ contextMessageCount: 7 })
+    await handlePermissionEvent(basePermission(), ctx)
 
     const callArgs = mockedGetMsgs.mock.calls[0]
     expect(callArgs?.[2]).toBe(7)
@@ -214,14 +236,10 @@ describe("handlePermission", () => {
     mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
     mockedSafe.mockResolvedValueOnce("allow")
 
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(basePermission(), output, {
-      ...baseCtx,
-      config: {
-        ...DEFAULT_CONFIG,
-        classifierModel: "anthropic/claude-haiku-4-5",
-      },
+    const { ctx } = buildCtx({
+      classifierModel: "anthropic/claude-haiku-4-5",
     })
+    await handlePermissionEvent(basePermission(), ctx)
 
     const args = mockedClassify.mock.calls[0]?.[0]
     expect(args?.model).toEqual({
@@ -230,15 +248,51 @@ describe("handlePermission", () => {
     })
   })
 
-  it("fails closed when no classifier model can be resolved", async () => {
-    const output = { status: "ask" as "ask" | "allow" | "deny" }
-    await handlePermission(basePermission(), output, {
-      ...baseCtx,
+  it("does nothing when no classifier model can be resolved", async () => {
+    const { ctx, respondCall } = buildCtx({
       sessionModel: undefined,
-      config: { ...DEFAULT_CONFIG, classifierModel: undefined },
+      classifierModel: undefined as unknown as string,
+    })
+    await handlePermissionEvent(basePermission(), ctx)
+    expect(mockedClassify).not.toHaveBeenCalled()
+    expect(respondCall).not.toHaveBeenCalled()
+  })
+
+  it("passes the loop-guard callbacks to classifyCommand", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(basePermission(), ctx)
+
+    const args = mockedClassify.mock.calls[0]?.[0]
+    expect(typeof args?.onEphemeralSessionCreated).toBe("function")
+    expect(typeof args?.onEphemeralSessionDeleted).toBe("function")
+
+    // Exercise the callbacks to confirm they update the tracking set.
+    args?.onEphemeralSessionCreated?.("sess_eph_abc")
+    expect(ctx.ephemeralSessionIDs.has("sess_eph_abc")).toBe(true)
+    args?.onEphemeralSessionDeleted?.("sess_eph_abc")
+    expect(ctx.ephemeralSessionIDs.has("sess_eph_abc")).toBe(false)
+  })
+
+  it("swallows SDK respond errors (TUI prompt remains as fallback)", async () => {
+    mockedClassify.mockResolvedValueOnce({
+      verdict: "SAFE",
+      reason: "r",
+    })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx, respondCall } = buildCtx({
+      respondImpl: async () => {
+        throw new Error("sdk boom")
+      },
     })
 
-    expect(output.status).toBe("ask")
-    expect(mockedClassify).not.toHaveBeenCalled()
+    // Should not throw.
+    await expect(
+      handlePermissionEvent(basePermission(), ctx),
+    ).resolves.toBeUndefined()
+    expect(respondCall).toHaveBeenCalledTimes(1)
   })
 })
