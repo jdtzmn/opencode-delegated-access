@@ -97,6 +97,19 @@ export async function handlePermissionEvent(
     permissionType: toolType,
   }
 
+  // DIAGNOSTIC: dump the full permission shape so we can see exactly what
+  // fields opencode emits through the event hook. Remove after we've
+  // calibrated the runtime-shape adapter against real data.
+  try {
+    log.info("raw permission shape (diagnostic)", {
+      hook: hookName,
+      permissionID: permission.id,
+      raw: JSON.stringify(permission),
+    })
+  } catch {
+    // JSON.stringify can throw on circular refs; the log is best-effort.
+  }
+
   // Disabled → let opencode's normal approval machinery handle it.
   if (!ctx.config.enabled) {
     log.info("skip: plugin disabled", base)
