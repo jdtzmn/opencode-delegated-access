@@ -1,7 +1,17 @@
 # Delegated Access — Design Spec
 
 **Date:** 2026-04-17
-**Status:** Approved for implementation
+**Status:** Implemented (see runtime caveat below)
+
+## Runtime caveat (discovered during smoke testing)
+
+The original design called for intercepting `permission.ask`, a plugin hook declared in `@opencode-ai/plugin@1.4.x`'s TypeScript types. Empirical testing against opencode 1.4.6 and 1.4.9 revealed that **the runtime does not actually dispatch this hook** — it is a types-only ghost. The only plugin attach point for permission events is the generic `event` hook, which fires AFTER a permission has already been queued and the TUI prompt has started displaying.
+
+**Consequence for SAFE commands:** the TUI prompt briefly appears before the plugin auto-dismisses it via `client.postSessionIdPermissionsPermissionId`. The user sees a short "flash" of the prompt (typically ~500ms while the classifier runs, plus the configured `safeCountdownMs`) rather than a prompt that never appears. RISKY and classifier-failure paths are unaffected.
+
+The shipped implementation uses the `event` hook (filtering for `permission.asked` and `permission.updated`), with a `permissionID` dedupe set and an ephemeral-classifier-session loop guard. See `src/index.ts` and `src/permission/handler.ts`. If opencode later wires up `permission.ask` for real, we can revisit for a tighter pre-ask UX.
+
+The remainder of this spec describes the original design as approved; treat "permission.ask fires" as "permission.asked event fires" when reading.
 
 ## Problem
 
@@ -30,11 +40,14 @@ Bash-only for v1. Other tool types continue to prompt normally.
 
 **Approach: in-process plugin, no daemon.**
 
-The plugin is stateless at rest. Each `permission.ask` invocation is self-contained:
+The plugin is stateless at rest (aside from a small dedupe set for permission IDs and an ephemeral-session tracking set). Each `permission.asked` event is self-contained:
 
 ```
-permission.ask fires
+permission.asked event fires
+(TUI prompt is already up at this point)
       │
+      ├─ Skip if we've already handled this permissionID
+      ├─ Skip if sessionID is one of our ephemeral classifier sessions
       ├─ Fetch last K user messages via client.session.messages
       ├─ Create ephemeral child session via client.session.create({ parentID })
       ├─ Call client.session.prompt with:
@@ -46,17 +59,16 @@ permission.ask fires
       ├─ Parse verdict: SAFE | RISKY | (parse failure = classifier failure)
       │
       ├─ SAFE →
-      │     Start ephemeral localhost HTTP server on random port + token
       │     Send OS notification "Running <cmd> in Ns — Cancel" with Cancel button
-      │     Race countdown vs HTTP hit
-      │     Countdown wins → output.status = "allow"
-      │     Cancel wins   → output.status = "ask"
+      │     Wait for the countdown or user cancel
+      │     Countdown → client.postSessionIdPermissionsPermissionId({ response: "once" })
+      │                 (dismisses the TUI prompt; opencode proceeds with the command)
+      │     Cancel    → do nothing (TUI prompt remains; user decides manually)
       │
       ├─ RISKY →
-      │     Set output.status = "ask" (TUI prompt shows)
       │     Fire-and-forget: notification with Approve/Reject buttons
-      │     Button click → hit opencode SDK to resolve the permission
-      │     TUI response → notification auto-dismissed (best-effort)
+      │     Button click → client.postSessionIdPermissionsPermissionId({ response: "once"|"reject" })
+      │     No button click → TUI prompt remains as the always-available fallback
       │
       └─ Classifier failure/timeout → output.status = "ask"
 ```
