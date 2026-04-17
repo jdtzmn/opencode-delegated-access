@@ -62,7 +62,7 @@ describe("ConfigSchema", () => {
       enabled: true,
       contextMessageCount: 3,
       safeCountdownMs: 5000,
-      classifierTimeoutMs: 5000,
+      classifierTimeoutMs: 15_000,
       notificationSound: true,
     })
   })

@@ -26,8 +26,13 @@ export const ConfigSchema = z.object({
    */
   classifierModel: z.string().optional(),
 
-  /** Fail-closed timeout for a single classifier call. */
-  classifierTimeoutMs: z.number().int().min(500).max(30_000).default(5_000),
+  /**
+   * Fail-closed timeout for a single classifier call. Haiku-class models
+   * streaming a structured verdict typically respond in 3–10 seconds; 15s
+   * gives comfortable headroom without making the user wait forever on a
+   * stuck classifier.
+   */
+  classifierTimeoutMs: z.number().int().min(500).max(60_000).default(15_000),
 
   /** Whether OS notifications play a sound. */
   notificationSound: z.boolean().default(true),

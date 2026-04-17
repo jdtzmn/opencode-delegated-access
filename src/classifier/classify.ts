@@ -77,6 +77,7 @@ export async function classifyCommand(args: {
   if (!ephemeralID) return null
   onEphemeralSessionCreated?.(ephemeralID)
 
+  let timedOut = false
   try {
     // Step 2: classifier prompt with timeout.
     const userPrompt = buildClassifierUserPrompt({ command, userMessages })
@@ -91,12 +92,18 @@ export async function classifyCommand(args: {
       },
     } as never)
 
-    const response = (await withTimeout(promptCall, timeoutMs, () => {
-      // Best-effort abort of the in-flight prompt on timeout.
-      // Errors swallowed — we're on the timeout path either way.
-      client.session
-        .abort({ path: { id: ephemeralID! } } as never)
-        .catch(() => {})
+    const response = (await withTimeout(promptCall, timeoutMs, async () => {
+      timedOut = true
+      // Await the abort so opencode's session.processor has a chance to
+      // stop streaming BEFORE the finally-block deletes the session. If we
+      // skip this wait, the still-streaming LLM response can race the
+      // delete and surface a "Session not found" error toast in the TUI.
+      try {
+        await client.session.abort({ path: { id: ephemeralID! } } as never)
+      } catch {
+        // Abort is best-effort; the post-abort settle delay still protects
+        // us from the common races.
+      }
     })) as { data?: { parts?: Part[] } } | null
 
     if (!response) return null
@@ -107,7 +114,13 @@ export async function classifyCommand(args: {
   } catch {
     return null
   } finally {
-    // Step 4: best-effort cleanup.
+    // Step 4: best-effort cleanup. On the timeout path, give the server a
+    // brief moment to fully quiesce the aborted stream before we delete —
+    // without this grace window, late LLM chunks arriving at the deleted
+    // session surface as a "Session not found" error toast in the TUI.
+    if (timedOut) {
+      await sleep(POST_ABORT_SETTLE_MS)
+    }
     try {
       await client.session.delete({ path: { id: ephemeralID } } as never)
     } catch {
@@ -115,6 +128,13 @@ export async function classifyCommand(args: {
     }
     onEphemeralSessionDeleted?.(ephemeralID)
   }
+}
+
+/** Grace period between aborting a timed-out prompt and deleting the session. */
+const POST_ABORT_SETTLE_MS = 250
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /**
@@ -129,20 +149,24 @@ function responseTextFromParts(parts: Part[]): string {
 }
 
 /**
- * Race a promise against a timeout. If the timeout fires first, resolves to
- * `null`; otherwise passes through the promise's result. Calls
- * `onTimeout` before resolving so the caller can best-effort abort any
- * in-flight work.
+ * Race a promise against a timeout. If the timeout fires first, awaits
+ * `onTimeout` (so callers can cleanly abort in-flight work before the
+ * caller's finally-block runs) and then resolves to `null`. Otherwise
+ * passes through the promise's result.
  */
 async function withTimeout<T>(
   p: Promise<T>,
   timeoutMs: number,
-  onTimeout: () => void,
+  onTimeout: () => Promise<void> | void,
 ): Promise<T | null> {
   let timer: NodeJS.Timeout | undefined
   const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => {
-      onTimeout()
+    timer = setTimeout(async () => {
+      try {
+        await onTimeout()
+      } catch {
+        // Timeout handler errors are swallowed — we're on the failure path.
+      }
       resolve(null)
     }, timeoutMs)
   })
