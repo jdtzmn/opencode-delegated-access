@@ -139,6 +139,19 @@ const DelegatedAccess: Plugin = async ({ client }) => {
 
   return {
     config: async (input) => {
+      // DIAGNOSTIC: dump the full config shape so we can see exactly what
+      // fields opencode passes. We've already caught the Permission type
+      // declaring `type`/`pattern` while the runtime emits
+      // `permission`/`patterns` — Config may have the same mismatch. Remove
+      // once we've calibrated the model field extraction.
+      try {
+        log.info("raw config shape (diagnostic)", {
+          raw: JSON.stringify(input),
+        })
+      } catch {
+        // JSON.stringify can throw on circular refs; log is best-effort.
+      }
+
       // Pull out the plugin-specific sub-object. opencode.json permits extra
       // keys, so we access it via a safe cast.
       const pluginBlob = (input as unknown as Record<string, unknown>)[
@@ -157,7 +170,9 @@ const DelegatedAccess: Plugin = async ({ client }) => {
       sessionModel =
         parseModelString(input.model) ?? parseModelString(input.small_model)
 
-      log.debug("config latched", {
+      // Info level (not debug) so we can tell from the log file whether
+      // the config hook fires at all on this opencode version.
+      log.info("config latched", {
         enabled: config.enabled,
         contextMessageCount: config.contextMessageCount,
         safeCountdownMs: config.safeCountdownMs,

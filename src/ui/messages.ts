@@ -1,5 +1,6 @@
 import type { Message, Part } from "@opencode-ai/sdk"
 import type { createOpencodeClient } from "@opencode-ai/sdk"
+import type { ModelRef } from "../classifier/model.ts"
 
 /**
  * One entry in the `client.session.messages` response: the envelope metadata
@@ -51,16 +52,57 @@ export function extractLastUserMessages(
 }
 
 /**
+ * Pure function: walk the entries in reverse and return the most recent
+ * assistant message's `{ providerID, modelID }`. Returns `null` if no
+ * assistant message exists or the latest assistant has missing/non-string
+ * model fields.
+ *
+ * Used as a fallback source for the classifier model when opencode's
+ * `config` hook hasn't fired (or hasn't carried a usable `model` value) —
+ * any session that has had at least one assistant turn will have a model
+ * recorded here.
+ */
+export function extractLatestAssistantModel(
+  entries: MessageEntry[],
+): ModelRef | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]
+    if (!entry || entry.info.role !== "assistant") continue
+    const info = entry.info as unknown as {
+      providerID?: unknown
+      modelID?: unknown
+    }
+    if (typeof info.providerID === "string" && typeof info.modelID === "string") {
+      return { providerID: info.providerID, modelID: info.modelID }
+    }
+    // Assistant found but model fields unusable — keep looking further back.
+  }
+  return null
+}
+
+/**
  * Thin I/O wrapper: fetch the session's messages via the SDK and return the
- * last K user messages as text. Encapsulates the one HTTP call so the pure
- * logic in {@link extractLastUserMessages} can be unit-tested in isolation.
+ * raw entries so callers can run multiple pure extractors against a single
+ * HTTP call.
+ */
+export async function getSessionMessages(
+  client: OpencodeClient,
+  sessionID: string,
+): Promise<MessageEntry[]> {
+  const response = await client.session.messages({ path: { id: sessionID } })
+  return (response.data ?? []) as MessageEntry[]
+}
+
+/**
+ * Backward-compat wrapper: fetch + extract user messages in one call. Kept
+ * so existing consumers don't need to migrate; new callers should prefer
+ * {@link getSessionMessages} + pure extractors for efficiency.
  */
 export async function getLastUserMessages(
   client: OpencodeClient,
   sessionID: string,
   k: number,
 ): Promise<string[]> {
-  const response = await client.session.messages({ path: { id: sessionID } })
-  const entries = (response.data ?? []) as MessageEntry[]
+  const entries = await getSessionMessages(client, sessionID)
   return extractLastUserMessages(entries, k)
 }

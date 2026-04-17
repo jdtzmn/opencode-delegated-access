@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest"
-import { extractLastUserMessages, getLastUserMessages } from "./messages.ts"
+import {
+  extractLastUserMessages,
+  extractLatestAssistantModel,
+  getLastUserMessages,
+  getSessionMessages,
+} from "./messages.ts"
 import type { MessageEntry } from "./messages.ts"
 
 /**
@@ -221,5 +226,114 @@ describe("getLastUserMessages", () => {
     }
     const result = await getLastUserMessages(client as never, "sess_x", 3)
     expect(result).toEqual([])
+  })
+})
+
+describe("getSessionMessages", () => {
+  it("returns the raw entries from client.session.messages", async () => {
+    const entries = [userEntry("1", "alpha"), assistantEntry("2", "reply")]
+    let receivedId: string | undefined
+    const client = {
+      session: {
+        messages: async (opts: { path: { id: string } }) => {
+          receivedId = opts.path.id
+          return { data: entries }
+        },
+      },
+    }
+
+    const result = await getSessionMessages(client as never, "sess_abc")
+    expect(receivedId).toBe("sess_abc")
+    expect(result).toEqual(entries)
+  })
+
+  it("returns an empty array when data is undefined", async () => {
+    const client = {
+      session: { messages: async () => ({ data: undefined }) },
+    }
+    const result = await getSessionMessages(client as never, "sess_x")
+    expect(result).toEqual([])
+  })
+})
+
+describe("extractLatestAssistantModel", () => {
+  it("returns provider+model from the latest assistant message", () => {
+    const entries = [
+      userEntry("u1", "hi"),
+      assistantEntry("a1", "hello"),
+      userEntry("u2", "thanks"),
+    ]
+    expect(extractLatestAssistantModel(entries)).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-5",
+    })
+  })
+
+  it("returns the MOST RECENT assistant's model when multiple exist", () => {
+    const older = assistantEntry("a_old", "older")
+    const newer: MessageEntry = {
+      info: {
+        ...(older.info as unknown as Record<string, unknown>),
+        id: "a_new",
+        providerID: "openai",
+        modelID: "gpt-4.1-mini",
+      } as MessageEntry["info"],
+      parts: [
+        {
+          id: "part_a_new",
+          sessionID: "sess_test",
+          messageID: "a_new",
+          type: "text",
+          text: "newer",
+        } as MessageEntry["parts"][number],
+      ],
+    }
+    const entries = [older, userEntry("u1", "more"), newer]
+    expect(extractLatestAssistantModel(entries)).toEqual({
+      providerID: "openai",
+      modelID: "gpt-4.1-mini",
+    })
+  })
+
+  it("returns null for an empty input", () => {
+    expect(extractLatestAssistantModel([])).toBeNull()
+  })
+
+  it("returns null when there are no assistant messages", () => {
+    const entries = [userEntry("u1", "a"), userEntry("u2", "b")]
+    expect(extractLatestAssistantModel(entries)).toBeNull()
+  })
+
+  it("skips assistants with non-string model fields and keeps searching older entries", () => {
+    const bad: MessageEntry = {
+      info: {
+        id: "a_bad",
+        sessionID: "sess_test",
+        role: "assistant",
+        providerID: 42, // not a string
+        modelID: undefined,
+      } as unknown as MessageEntry["info"],
+      parts: [],
+    }
+    const good = assistantEntry("a_good", "ok")
+    // `good` comes before `bad` chronologically but `bad` is latest and must be
+    // skipped; we then fall back to `good`.
+    const entries = [good, bad]
+    expect(extractLatestAssistantModel(entries)).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-5",
+    })
+  })
+
+  it("returns null when every assistant has unusable model fields", () => {
+    const bad: MessageEntry = {
+      info: {
+        id: "a_bad",
+        sessionID: "sess_test",
+        role: "assistant",
+      } as unknown as MessageEntry["info"],
+      parts: [],
+    }
+    expect(extractLatestAssistantModel([userEntry("u1", "x"), bad])).toBeNull()
   })
 })

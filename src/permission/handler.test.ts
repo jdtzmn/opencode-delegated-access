@@ -3,9 +3,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 vi.mock("../classifier/classify.ts", () => ({
   classifyCommand: vi.fn(),
 }))
-vi.mock("../ui/messages.ts", () => ({
-  getLastUserMessages: vi.fn(),
-}))
+// Only `getSessionMessages` is mocked (it's the only I/O call the handler
+// performs against the messages module). The pure extractors
+// (extractLastUserMessages / extractLatestAssistantModel) run unmocked so
+// tests exercise the same code path as production.
+vi.mock("../ui/messages.ts", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return {
+    ...actual,
+    getSessionMessages: vi.fn(),
+  }
+})
 vi.mock("./safe-path.ts", () => ({
   runSafePath: vi.fn(),
 }))
@@ -14,16 +22,54 @@ vi.mock("./risky-path.ts", () => ({
 }))
 
 import { classifyCommand } from "../classifier/classify.ts"
-import { getLastUserMessages } from "../ui/messages.ts"
+import { getSessionMessages, type MessageEntry } from "../ui/messages.ts"
 import { runSafePath } from "./safe-path.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
 import { handlePermissionEvent } from "./handler.ts"
 import { DEFAULT_CONFIG } from "../config.ts"
 
 const mockedClassify = vi.mocked(classifyCommand)
-const mockedGetMsgs = vi.mocked(getLastUserMessages)
+const mockedGetSessionMessages = vi.mocked(getSessionMessages)
 const mockedSafe = vi.mocked(runSafePath)
 const mockedRisky = vi.mocked(runRiskyPathInBackground)
+
+/** Minimal synthetic entry helpers for handler tests. */
+function userEntry(text: string): MessageEntry {
+  return {
+    info: {
+      id: `u_${text}`,
+      sessionID: "sess_test",
+      role: "user",
+      time: { created: 0 },
+    } as MessageEntry["info"],
+    parts: [
+      {
+        id: `p_${text}`,
+        sessionID: "sess_test",
+        messageID: `u_${text}`,
+        type: "text",
+        text,
+      } as MessageEntry["parts"][number],
+    ],
+  }
+}
+
+function assistantEntryWithModel(
+  providerID: string,
+  modelID: string,
+): MessageEntry {
+  return {
+    info: {
+      id: `a_${modelID}`,
+      sessionID: "sess_test",
+      role: "assistant",
+      time: { created: 0 },
+      providerID,
+      modelID,
+    } as unknown as MessageEntry["info"],
+    parts: [],
+  }
+}
 
 /**
  * Build a ctx whose client records calls to the permission-respond endpoint.
@@ -71,10 +117,14 @@ function buildCtx(overrides: Partial<{
 
 beforeEach(() => {
   mockedClassify.mockReset()
-  mockedGetMsgs.mockReset()
+  mockedGetSessionMessages.mockReset()
   mockedSafe.mockReset()
   mockedRisky.mockReset()
-  mockedGetMsgs.mockResolvedValue(["please check the repo"])
+  // Default: one user message, no assistant messages. Tests that need
+  // assistant-model fallback override this with their own value.
+  mockedGetSessionMessages.mockResolvedValue([
+    userEntry("please check the repo"),
+  ])
 })
 
 function basePermission(overrides: Record<string, unknown> = {}) {
@@ -174,8 +224,8 @@ describe("handlePermissionEvent", () => {
     expect(mockedRisky).not.toHaveBeenCalled()
   })
 
-  it("does nothing when getLastUserMessages throws", async () => {
-    mockedGetMsgs.mockRejectedValueOnce(new Error("sdk explode"))
+  it("does nothing when getSessionMessages throws", async () => {
+    mockedGetSessionMessages.mockRejectedValueOnce(new Error("sdk explode"))
 
     const { ctx, respondCall } = buildCtx()
     await handlePermissionEvent(basePermission(), ctx)
@@ -228,15 +278,25 @@ describe("handlePermissionEvent", () => {
     expect(respondCall).not.toHaveBeenCalled()
   })
 
-  it("passes config.contextMessageCount to getLastUserMessages", async () => {
+  it("applies config.contextMessageCount when extracting user messages", async () => {
     mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
     mockedSafe.mockResolvedValueOnce("allow")
 
-    const { ctx } = buildCtx({ contextMessageCount: 7 })
+    // 5 user messages available; contextMessageCount=2 → classifier sees
+    // only the last 2.
+    mockedGetSessionMessages.mockResolvedValueOnce([
+      userEntry("m1"),
+      userEntry("m2"),
+      userEntry("m3"),
+      userEntry("m4"),
+      userEntry("m5"),
+    ])
+
+    const { ctx } = buildCtx({ contextMessageCount: 2 })
     await handlePermissionEvent(basePermission(), ctx)
 
-    const callArgs = mockedGetMsgs.mock.calls[0]
-    expect(callArgs?.[2]).toBe(7)
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(classifyArgs?.userMessages).toEqual(["m4", "m5"])
   })
 
   it("uses the resolved classifier model (config override wins)", async () => {
@@ -477,5 +537,88 @@ describe("handlePermissionEvent", () => {
     expect(mockedClassify).toHaveBeenCalledTimes(1)
     const classifyArgs = mockedClassify.mock.calls[0]?.[0]
     expect(classifyArgs?.command).toBe("ls -la")
+  })
+
+  // --- session-model fallback from latest assistant message -------------
+  //
+  // When the `config` hook hasn't surfaced `ctx.sessionModel` (e.g. the
+  // hook didn't fire, or opencode's runtime Config uses different field
+  // names), the handler falls back to the latest assistant message's
+  // model in the session's message stream.
+
+  it("uses assistant-message model fallback when ctx.sessionModel is undefined", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    // Message stream contains an assistant with a model; ctx.sessionModel
+    // is undefined; no classifier override.
+    mockedGetSessionMessages.mockResolvedValueOnce([
+      userEntry("help me out"),
+      assistantEntryWithModel("openai", "gpt-5-codex"),
+      userEntry("thanks"),
+    ])
+
+    const { ctx } = buildCtx({ sessionModel: undefined })
+    await handlePermissionEvent(basePermission(), ctx)
+
+    expect(mockedClassify).toHaveBeenCalledTimes(1)
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    // openai has a provider default (gpt-4.1-mini), which the resolver
+    // prefers over the fallback's raw modelID.
+    expect(classifyArgs?.model.providerID).toBe("openai")
+  })
+
+  it("still skips with 'no classifier model' when every source fails", async () => {
+    // No ctx.sessionModel, no config override, message stream has no
+    // assistant with a model → resolver returns null → handler skips.
+    mockedGetSessionMessages.mockResolvedValueOnce([userEntry("just me")])
+    const { ctx, respondCall } = buildCtx({ sessionModel: undefined })
+
+    await handlePermissionEvent(basePermission(), ctx)
+
+    expect(mockedClassify).not.toHaveBeenCalled()
+    expect(respondCall).not.toHaveBeenCalled()
+  })
+
+  it("ctx.sessionModel takes precedence over the assistant-message fallback", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    // Assistant in stream says openai/gpt-5, but ctx.sessionModel says
+    // anthropic/claude-sonnet. The explicit ctx value wins.
+    mockedGetSessionMessages.mockResolvedValueOnce([
+      userEntry("hi"),
+      assistantEntryWithModel("openai", "gpt-5"),
+    ])
+
+    const { ctx } = buildCtx({
+      sessionModel: { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
+    })
+    await handlePermissionEvent(basePermission(), ctx)
+
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(classifyArgs?.model.providerID).toBe("anthropic")
+  })
+
+  it("config classifierModel override takes precedence over both session and fallback", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    mockedGetSessionMessages.mockResolvedValueOnce([
+      userEntry("hi"),
+      assistantEntryWithModel("openai", "gpt-5"),
+    ])
+
+    const { ctx } = buildCtx({
+      classifierModel: "anthropic/claude-haiku-4-5",
+      sessionModel: { providerID: "openai", modelID: "gpt-4o" },
+    })
+    await handlePermissionEvent(basePermission(), ctx)
+
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(classifyArgs?.model).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-haiku-4-5",
+    })
   })
 })

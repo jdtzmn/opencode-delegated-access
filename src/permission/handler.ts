@@ -1,6 +1,10 @@
 import type { createOpencodeClient, Permission } from "@opencode-ai/sdk"
 import type { DelegatedAccessConfig } from "../config.ts"
-import { getLastUserMessages } from "../ui/messages.ts"
+import {
+  extractLastUserMessages,
+  extractLatestAssistantModel,
+  getSessionMessages,
+} from "../ui/messages.ts"
 import { classifyCommand } from "../classifier/classify.ts"
 import { resolveClassifierModel, type ModelRef } from "../classifier/model.ts"
 import { runSafePath } from "./safe-path.ts"
@@ -97,19 +101,6 @@ export async function handlePermissionEvent(
     permissionType: toolType,
   }
 
-  // DIAGNOSTIC: dump the full permission shape so we can see exactly what
-  // fields opencode emits through the event hook. Remove after we've
-  // calibrated the runtime-shape adapter against real data.
-  try {
-    log.info("raw permission shape (diagnostic)", {
-      hook: hookName,
-      permissionID: permission.id,
-      raw: JSON.stringify(permission),
-    })
-  } catch {
-    // JSON.stringify can throw on circular refs; the log is best-effort.
-  }
-
   // Disabled → let opencode's normal approval machinery handle it.
   if (!ctx.config.enabled) {
     log.info("skip: plugin disabled", base)
@@ -132,38 +123,57 @@ export async function handlePermissionEvent(
     return
   }
 
-  // Resolve classifier model (config override → provider default → session
-  // model → null).
-  const model = resolveClassifierModel({
-    configOverride: ctx.config.classifierModel,
-    sessionModel: ctx.sessionModel,
-  })
-  if (!model) {
-    log.warn("skip: no classifier model could be resolved", base)
-    return
-  }
-
-  log.info("classifying", {
-    ...base,
-    command,
-    classifierModel: `${model.providerID}/${model.modelID}`,
-  })
-
-  // Fetch the last K user messages for the classifier's context.
-  let userMessages: string[]
+  // Fetch the session's messages once: the classifier context needs the
+  // last K user messages, and we derive a session-model fallback from the
+  // most recent assistant message (used when the `config` hook hasn't run
+  // or didn't surface a model).
+  let entries
   try {
-    userMessages = await getLastUserMessages(
-      ctx.client,
-      permission.sessionID,
-      ctx.config.contextMessageCount,
-    )
+    entries = await getSessionMessages(ctx.client, permission.sessionID)
   } catch (e) {
-    log.error("getLastUserMessages failed", {
+    log.error("getSessionMessages failed", {
       ...base,
       error: e instanceof Error ? e.message : String(e),
     })
     return
   }
+
+  const userMessages = extractLastUserMessages(
+    entries,
+    ctx.config.contextMessageCount,
+  )
+  const fallbackModel = extractLatestAssistantModel(entries)
+
+  // Resolve classifier model (config override → provider default → session
+  // model → assistant-message fallback → null).
+  const model = resolveClassifierModel({
+    configOverride: ctx.config.classifierModel,
+    sessionModel: ctx.sessionModel ?? fallbackModel ?? undefined,
+  })
+  if (!model) {
+    log.warn("skip: no classifier model could be resolved", {
+      ...base,
+      hasCtxSessionModel: Boolean(ctx.sessionModel),
+      hasFallbackModel: Boolean(fallbackModel),
+      hasConfigOverride: Boolean(ctx.config.classifierModel),
+    })
+    return
+  }
+
+  const modelSource = ctx.config.classifierModel
+    ? "configOverride"
+    : ctx.sessionModel
+      ? "ctxSessionModel"
+      : fallbackModel
+        ? "latestAssistantMessage"
+        : "unknown"
+
+  log.info("classifying", {
+    ...base,
+    command,
+    classifierModel: `${model.providerID}/${model.modelID}`,
+    modelSource,
+  })
 
   // Run the classifier. Track the ephemeral session ID in the loop-guard
   // set so that if the classifier somehow generates its own permission
