@@ -17,6 +17,8 @@ type OpencodeClient = ReturnType<typeof createOpencodeClient>
  */
 const BASH_TYPE_MATCHES = new Set(["bash", "command"])
 
+const LOG_PREFIX = "[delegated-access]"
+
 export type HandlerContext = {
   client: OpencodeClient
   config: DelegatedAccessConfig
@@ -111,7 +113,14 @@ export async function handlePermissionEvent(
     onEphemeralSessionDeleted: (id) => ctx.ephemeralSessionIDs.delete(id),
   })
 
-  if (!verdict) return // fail closed: TUI prompt remains, user decides
+  if (!verdict) {
+    console.error(`${LOG_PREFIX} classifier failed; leaving TUI prompt alone`)
+    return // fail closed: TUI prompt remains, user decides
+  }
+
+  console.error(
+    `${LOG_PREFIX} verdict=${verdict.verdict} reason=${JSON.stringify(verdict.reason)}`,
+  )
 
   if (verdict.verdict === "SAFE") {
     const decision = await runSafePath({
@@ -121,9 +130,13 @@ export async function handlePermissionEvent(
       sound: ctx.config.notificationSound,
     })
     if (decision === "allow") {
+      console.error(`${LOG_PREFIX} auto-approving ${JSON.stringify(command)}`)
       await respondToPermission(ctx.client, permission, "once")
+    } else {
+      console.error(
+        `${LOG_PREFIX} user cancelled auto-approval; TUI prompt remains`,
+      )
     }
-    // decision === "ask" → do nothing; TUI prompt is already there.
     return
   }
 

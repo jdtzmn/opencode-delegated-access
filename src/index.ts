@@ -28,7 +28,11 @@ import type { ModelRef } from "./classifier/model.ts"
  *     }
  *   }
  */
+const LOG_PREFIX = "[delegated-access]"
+
 const DelegatedAccess: Plugin = async ({ client }) => {
+  console.error(`${LOG_PREFIX} plugin loaded`)
+
   // Config is resolved lazily — we receive the full config blob via the
   // `config` hook and latch the plugin-specific subsection. Defaults take
   // over until the first `config` call or if the user never sets any.
@@ -109,6 +113,10 @@ const DelegatedAccess: Plugin = async ({ client }) => {
       if (handledPermissionIDs.has(permission.id)) return
       rememberHandled(permission.id)
 
+      console.error(
+        `${LOG_PREFIX} ${type} ${permission.type} id=${permission.id} pattern=${JSON.stringify(permission.pattern)}`,
+      )
+
       const ctx: HandlerContext = {
         client,
         config,
@@ -118,9 +126,12 @@ const DelegatedAccess: Plugin = async ({ client }) => {
 
       try {
         await handlePermissionEvent(permission, ctx)
-      } catch {
+      } catch (e) {
         // Defensive catch-all: any unexpected error in our code must not
         // crash the session. The TUI prompt remains as a fallback.
+        console.error(
+          `${LOG_PREFIX} handler threw: ${e instanceof Error ? e.message : String(e)}`,
+        )
       }
     },
   }
