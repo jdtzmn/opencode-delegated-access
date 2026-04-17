@@ -74,10 +74,27 @@ export async function handlePermissionEvent(
 ): Promise<void> {
   const { hookName, output } = opts
   const { log } = ctx
+
+  // Runtime-shape adapter.
+  //
+  // The SDK's typed Permission declares `type: string` and `pattern: string |
+  // string[]`, but the opencode 1.4.x event stream actually emits
+  // `{ permission: string, patterns: string[] }` (different field names).
+  // Prefer the runtime names, fall back to the SDK-typed names so both
+  // shapes and our test fixtures keep working.
+  const runtimeShape = permission as unknown as {
+    permission?: string
+    patterns?: string[]
+    type?: string
+    pattern?: string | string[]
+  }
+  const toolType = runtimeShape.permission ?? runtimeShape.type
+  const patterns = runtimeShape.patterns ?? runtimeShape.pattern
+
   const base = {
     hook: hookName,
     permissionID: permission.id,
-    permissionType: permission.type,
+    permissionType: toolType,
   }
 
   // Disabled → let opencode's normal approval machinery handle it.
@@ -87,17 +104,17 @@ export async function handlePermissionEvent(
   }
 
   // Non-bash → outside v1 scope.
-  if (!BASH_TYPE_MATCHES.has(permission.type)) {
+  if (!toolType || !BASH_TYPE_MATCHES.has(toolType)) {
     log.info("skip: not a bash permission", base)
     return
   }
 
-  // Extract the command. `pattern` can be string or array (or missing).
-  const command = extractCommand(permission.pattern)
+  // Extract the command. `patterns` / `pattern` can be string or array.
+  const command = extractCommand(patterns)
   if (command === null) {
     log.info("skip: no command in pattern", {
       ...base,
-      pattern: permission.pattern as unknown,
+      pattern: patterns as unknown,
     })
     return
   }
@@ -239,11 +256,12 @@ async function respondToPermission(
 }
 
 /**
- * Coerce OpenCode's `Permission.pattern` (string | string[] | undefined) into
- * a single command string. Returns `null` when no usable command is present.
+ * Coerce OpenCode's pattern field (string | string[] | undefined — under
+ * either the SDK-typed `pattern` key or the runtime `patterns` key) into a
+ * single command string. Returns `null` when no usable command is present.
  */
 function extractCommand(
-  pattern: Permission["pattern"] | undefined,
+  pattern: string | string[] | undefined,
 ): string | null {
   if (typeof pattern === "string") {
     return pattern.length > 0 ? pattern : null

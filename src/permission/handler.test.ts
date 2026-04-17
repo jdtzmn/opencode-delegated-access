@@ -381,4 +381,101 @@ describe("handlePermissionEvent", () => {
 
     expect(respondCall).toHaveBeenCalledTimes(1)
   })
+
+  // --- runtime-shape adapter --------------------------------------------
+  //
+  // The opencode 1.4.x event stream emits permissions with field names
+  // `permission` (tool type) and `patterns` (string[]), different from the
+  // SDK-typed Permission's `type` / `pattern`. The handler must accept
+  // both.
+
+  it("accepts runtime-shape permission ({ permission, patterns })", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx, respondCall } = buildCtx()
+    // Shape as opencode actually emits on 1.4.x: `permission` (not `type`)
+    // and `patterns` (array, not `pattern`).
+    const runtime = {
+      id: "per_runtime",
+      permission: "bash",
+      patterns: ["uname -a"],
+      sessionID: "sess_rt",
+      messageID: "msg_rt",
+      title: "Run bash command",
+      metadata: {},
+      time: { created: 0 },
+    } as never
+
+    await handlePermissionEvent(runtime, ctx)
+
+    expect(mockedClassify).toHaveBeenCalledTimes(1)
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(classifyArgs?.command).toBe("uname -a")
+    expect(respondCall).toHaveBeenCalledTimes(1)
+  })
+
+  it("skips runtime-shape permission with a non-bash `permission` value", async () => {
+    const { ctx, respondCall } = buildCtx()
+    const runtime = {
+      id: "per_runtime_task",
+      permission: "task",
+      patterns: ["committer"],
+      sessionID: "sess_rt",
+      messageID: "msg_rt",
+      title: "Launch subagent",
+      metadata: {},
+      time: { created: 0 },
+    } as never
+
+    await handlePermissionEvent(runtime, ctx)
+
+    expect(mockedClassify).not.toHaveBeenCalled()
+    expect(respondCall).not.toHaveBeenCalled()
+  })
+
+  it("skips runtime-shape permission when `patterns` is empty", async () => {
+    const { ctx, respondCall } = buildCtx()
+    const runtime = {
+      id: "per_runtime_empty",
+      permission: "bash",
+      patterns: [],
+      sessionID: "sess_rt",
+      messageID: "msg_rt",
+      title: "Run bash command",
+      metadata: {},
+      time: { created: 0 },
+    } as never
+
+    await handlePermissionEvent(runtime, ctx)
+
+    expect(mockedClassify).not.toHaveBeenCalled()
+    expect(respondCall).not.toHaveBeenCalled()
+  })
+
+  it("prefers runtime-shape fields over SDK-typed fields when both present", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx } = buildCtx()
+    // Hybrid input: both shapes present. Runtime names should win.
+    const hybrid = {
+      id: "per_hybrid",
+      type: "task", // SDK-typed: would be skipped as non-bash
+      pattern: "wrong command", // SDK-typed
+      permission: "bash", // runtime: should win, passes bash check
+      patterns: ["ls -la"], // runtime: should win, extract this command
+      sessionID: "sess_rt",
+      messageID: "msg_rt",
+      title: "Run bash command",
+      metadata: {},
+      time: { created: 0 },
+    } as never
+
+    await handlePermissionEvent(hybrid, ctx)
+
+    expect(mockedClassify).toHaveBeenCalledTimes(1)
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(classifyArgs?.command).toBe("ls -la")
+  })
 })
