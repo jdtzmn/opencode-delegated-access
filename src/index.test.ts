@@ -192,6 +192,9 @@ describe("DelegatedAccess plugin entry — shotgun hook registration", () => {
     const ctx = mockedHandle.mock.calls[0]?.[1]
     expect(ctx?.config.enabled).toBe(true)
     expect(ctx?.sessionModel).toBeUndefined()
+    // Logger is wired through into every dispatch.
+    expect(typeof ctx?.log?.info).toBe("function")
+    expect(typeof ctx?.log?.error).toBe("function")
   })
 
   it("latches plugin config from the delegatedAccess key in opencode config", async () => {

@@ -39,6 +39,12 @@ function buildCtx(overrides: Partial<{
   const respondCall = vi.fn(
     overrides.respondImpl ?? (async () => ({ data: true } as unknown)),
   )
+  const log = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }
   const ctx = {
     client: {
       postSessionIdPermissionsPermissionId: respondCall,
@@ -58,8 +64,9 @@ function buildCtx(overrides: Partial<{
         ? overrides.sessionModel
         : { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
     ephemeralSessionIDs: new Set<string>(),
+    log,
   }
-  return { ctx, respondCall }
+  return { ctx, respondCall, log }
 }
 
 beforeEach(() => {

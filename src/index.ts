@@ -7,6 +7,7 @@ import {
   type HandlerOutput,
 } from "./permission/handler.ts"
 import type { ModelRef } from "./classifier/model.ts"
+import { createLogger, type Logger } from "./log.ts"
 
 /**
  * OpenCode plugin entry point.
@@ -26,13 +27,20 @@ import type { ModelRef } from "./classifier/model.ts"
  * each permission is classified exactly once regardless of how many hooks
  * fire for it.
  *
+ * All diagnostic output goes through `client.app.log` (service
+ * `delegated-access`). Grep the opencode log file to see it:
+ *
+ *     grep service=delegated-access ~/.local/share/opencode/log/*.log
+ *
+ * This bypasses the TUI prompt-bar sink that otherwise hides plugin
+ * console output behind permission UIs.
+ *
  * Plugin config: opencode.json → top-level `delegatedAccess` object. Any
  * shape mismatch is ignored; defaults fill in.
  */
-const LOG_PREFIX = "[delegated-access]"
-
 const DelegatedAccess: Plugin = async ({ client }) => {
-  console.error(`${LOG_PREFIX} plugin loaded`)
+  const log: Logger = createLogger(client)
+  log.info("plugin loaded")
 
   // Config is resolved lazily — we receive the full config blob via the
   // `config` hook and latch the plugin-specific subsection. Defaults take
@@ -71,7 +79,7 @@ const DelegatedAccess: Plugin = async ({ client }) => {
   }
 
   function buildCtx(): HandlerContext {
-    return { client, config, sessionModel, ephemeralSessionIDs }
+    return { client, config, sessionModel, ephemeralSessionIDs, log }
   }
 
   /**
@@ -90,15 +98,31 @@ const DelegatedAccess: Plugin = async ({ client }) => {
     }
 
     // Loop-guard: skip events from our own ephemeral classifier sessions.
-    if (ephemeralSessionIDs.has(permission.sessionID)) return
+    if (ephemeralSessionIDs.has(permission.sessionID)) {
+      log.debug("skip: ephemeral classifier session", {
+        hook: hookName,
+        permissionID: permission.id,
+      })
+      return
+    }
 
     // Dedupe: only handle each permission once across all hooks.
-    if (handledPermissionIDs.has(permission.id)) return
+    if (handledPermissionIDs.has(permission.id)) {
+      log.debug("skip: already handled", {
+        hook: hookName,
+        permissionID: permission.id,
+      })
+      return
+    }
     rememberHandled(permission.id)
 
-    console.error(
-      `${LOG_PREFIX} ${hookName} fired id=${permission.id} type=${permission.type} pattern=${JSON.stringify(permission.pattern)}`,
-    )
+    log.info("hook fired", {
+      hook: hookName,
+      permissionID: permission.id,
+      permissionType: permission.type,
+      pattern: permission.pattern as unknown,
+      hasOutput: output !== undefined,
+    })
 
     try {
       await handlePermissionEvent(permission, buildCtx(), {
@@ -106,9 +130,10 @@ const DelegatedAccess: Plugin = async ({ client }) => {
         ...(output !== undefined ? { output } : {}),
       })
     } catch (e) {
-      console.error(
-        `${LOG_PREFIX} ${hookName} handler threw: ${e instanceof Error ? e.message : String(e)}`,
-      )
+      log.error("handler threw", {
+        hook: hookName,
+        error: e instanceof Error ? e.message : String(e),
+      })
     }
   }
 
@@ -131,6 +156,17 @@ const DelegatedAccess: Plugin = async ({ client }) => {
       // auto-detection. Falls back to `small_model` if the user has one set.
       sessionModel =
         parseModelString(input.model) ?? parseModelString(input.small_model)
+
+      log.debug("config latched", {
+        enabled: config.enabled,
+        contextMessageCount: config.contextMessageCount,
+        safeCountdownMs: config.safeCountdownMs,
+        classifierTimeoutMs: config.classifierTimeoutMs,
+        classifierModel: config.classifierModel,
+        sessionModel: sessionModel
+          ? `${sessionModel.providerID}/${sessionModel.modelID}`
+          : null,
+      })
     },
 
     // Path 1: typed permission.ask hook. If opencode dispatches this, we

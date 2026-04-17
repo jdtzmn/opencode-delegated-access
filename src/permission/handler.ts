@@ -5,6 +5,7 @@ import { classifyCommand } from "../classifier/classify.ts"
 import { resolveClassifierModel, type ModelRef } from "../classifier/model.ts"
 import { runSafePath } from "./safe-path.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
+import type { Logger } from "../log.ts"
 
 type OpencodeClient = ReturnType<typeof createOpencodeClient>
 
@@ -16,8 +17,6 @@ type OpencodeClient = ReturnType<typeof createOpencodeClient>
  * additional synonyms can be added if opencode versions diverge.
  */
 const BASH_TYPE_MATCHES = new Set(["bash", "command"])
-
-const LOG_PREFIX = "[delegated-access]"
 
 export type HandlerContext = {
   client: OpencodeClient
@@ -35,6 +34,8 @@ export type HandlerContext = {
    * `tools: {}` and shouldn't generate permissions, but we guard anyway).
    */
   ephemeralSessionIDs: Set<string>
+  /** Logger for diagnostic output. */
+  log: Logger
 }
 
 /**
@@ -65,15 +66,6 @@ export type HandlerOutput = { status: "ask" | "deny" | "allow" }
  *
  * Shared dedupe (via `ctx`'s caller) ensures each permissionID is handled
  * exactly once regardless of how many hooks fire for it.
- *
- * Flow:
- *   - Disabled / non-bash type / no command / no model → do nothing (TUI
- *     prompt stays, user decides manually).
- *   - Classifier failure → same.
- *   - SAFE → countdown notification; on "allow" outcome, set
- *     `output.status` (if available) OR call the SDK respond endpoint.
- *   - RISKY → kick off risky-path notification (Approve/Reject buttons);
- *     button clicks resolve the permission via the SDK.
  */
 export async function handlePermissionEvent(
   permission: Permission,
@@ -81,16 +73,34 @@ export async function handlePermissionEvent(
   opts: { hookName: string; output?: HandlerOutput } = { hookName: "unknown" },
 ): Promise<void> {
   const { hookName, output } = opts
+  const { log } = ctx
+  const base = {
+    hook: hookName,
+    permissionID: permission.id,
+    permissionType: permission.type,
+  }
 
   // Disabled → let opencode's normal approval machinery handle it.
-  if (!ctx.config.enabled) return
+  if (!ctx.config.enabled) {
+    log.info("skip: plugin disabled", base)
+    return
+  }
 
   // Non-bash → outside v1 scope.
-  if (!BASH_TYPE_MATCHES.has(permission.type)) return
+  if (!BASH_TYPE_MATCHES.has(permission.type)) {
+    log.info("skip: not a bash permission", base)
+    return
+  }
 
   // Extract the command. `pattern` can be string or array (or missing).
   const command = extractCommand(permission.pattern)
-  if (command === null) return
+  if (command === null) {
+    log.info("skip: no command in pattern", {
+      ...base,
+      pattern: permission.pattern as unknown,
+    })
+    return
+  }
 
   // Resolve classifier model (config override → provider default → session
   // model → null).
@@ -98,11 +108,16 @@ export async function handlePermissionEvent(
     configOverride: ctx.config.classifierModel,
     sessionModel: ctx.sessionModel,
   })
-  if (!model) return
+  if (!model) {
+    log.warn("skip: no classifier model could be resolved", base)
+    return
+  }
 
-  console.error(
-    `${LOG_PREFIX} classifying via ${hookName} cmd=${JSON.stringify(command)}`,
-  )
+  log.info("classifying", {
+    ...base,
+    command,
+    classifierModel: `${model.providerID}/${model.modelID}`,
+  })
 
   // Fetch the last K user messages for the classifier's context.
   let userMessages: string[]
@@ -113,9 +128,10 @@ export async function handlePermissionEvent(
       ctx.config.contextMessageCount,
     )
   } catch (e) {
-    console.error(
-      `${LOG_PREFIX} getLastUserMessages failed: ${e instanceof Error ? e.message : String(e)}`,
-    )
+    log.error("getLastUserMessages failed", {
+      ...base,
+      error: e instanceof Error ? e.message : String(e),
+    })
     return
   }
 
@@ -135,13 +151,15 @@ export async function handlePermissionEvent(
   })
 
   if (!verdict) {
-    console.error(`${LOG_PREFIX} classifier failed; leaving TUI prompt alone`)
+    log.warn("classifier failed; leaving TUI prompt alone", base)
     return // fail closed: TUI prompt remains, user decides
   }
 
-  console.error(
-    `${LOG_PREFIX} verdict=${verdict.verdict} reason=${JSON.stringify(verdict.reason)}`,
-  )
+  log.info("classifier verdict", {
+    ...base,
+    verdict: verdict.verdict,
+    reason: verdict.reason,
+  })
 
   if (verdict.verdict === "SAFE") {
     const decision = await runSafePath({
@@ -151,22 +169,21 @@ export async function handlePermissionEvent(
       sound: ctx.config.notificationSound,
     })
     if (decision === "allow") {
-      console.error(`${LOG_PREFIX} auto-approving ${JSON.stringify(command)}`)
+      log.info("auto-approving", { ...base, command, viaOutput: Boolean(output) })
       // Prefer pre-ask output mutation when the hook supports it (avoids
       // the TUI flash); otherwise fall back to the SDK respond endpoint.
       if (output) {
         output.status = "allow"
       } else {
-        await respondToPermission(ctx.client, permission, "once")
+        await respondToPermission(ctx.client, permission, "once", log)
       }
     } else {
-      console.error(
-        `${LOG_PREFIX} user cancelled auto-approval; TUI prompt remains`,
-      )
+      log.info("user cancelled auto-approval; TUI prompt remains", base)
     }
     return
   }
 
+  log.info("risky — escalating via TUI + notification", base)
   // RISKY: kick off the notification with Approve/Reject buttons. The
   // notification resolves via the SDK on button click; if the user
   // answers in the TUI first, the notification is a no-op.
@@ -193,6 +210,7 @@ async function respondToPermission(
   client: OpencodeClient,
   permission: Permission,
   response: "once" | "always" | "reject",
+  log: Logger,
 ): Promise<void> {
   try {
     await (
@@ -206,11 +224,17 @@ async function respondToPermission(
       path: { id: permission.sessionID, permissionID: permission.id },
       body: { response },
     })
+    log.info("permission respond succeeded", {
+      permissionID: permission.id,
+      response,
+    })
   } catch (e) {
     // TUI prompt still live as fallback.
-    console.error(
-      `${LOG_PREFIX} respondToPermission failed: ${e instanceof Error ? e.message : String(e)}`,
-    )
+    log.error("permission respond failed", {
+      permissionID: permission.id,
+      response,
+      error: e instanceof Error ? e.message : String(e),
+    })
   }
 }
 
