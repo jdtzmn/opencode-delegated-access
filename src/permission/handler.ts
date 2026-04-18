@@ -202,12 +202,18 @@ export async function handlePermissionEvent(
   })
 
   if (verdict.verdict === "SAFE") {
+    log.info("entering safe-path", {
+      ...base,
+      countdownMs: ctx.config.safeCountdownMs,
+    })
     const decision = await runSafePath({
       command,
       reason: verdict.reason,
       countdownMs: ctx.config.safeCountdownMs,
       sound: ctx.config.notificationSound,
+      log,
     })
+    log.info("safe-path returned", { ...base, decision })
     if (decision === "allow") {
       log.info("auto-approving", { ...base, command, viaOutput: Boolean(output) })
       // Prefer pre-ask output mutation when the hook supports it (avoids

@@ -142,4 +142,58 @@ describe("runSafePath", () => {
     // Body should include some form of the command but be bounded in length.
     expect(args?.message.length).toBeLessThan(300)
   })
+
+  it("emits diagnostic logs before scheduling and after resolving the notification", async () => {
+    mockedSend.mockResolvedValueOnce({ type: "timeout" } as NotifyActionResult)
+
+    const log = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    }
+
+    await runSafePath({
+      command: "ls",
+      reason: "r",
+      countdownMs: 5_000,
+      sound: true,
+      log,
+    })
+
+    const messages = log.info.mock.calls.map((c) => c[0])
+    // At minimum: one log at schedule time, one after the notification resolves.
+    expect(messages).toContain("safe-path: scheduling notification")
+    expect(messages).toContain("safe-path: notification resolved")
+  })
+
+  it("records the notifier error message when the notification errors", async () => {
+    mockedSend.mockResolvedValueOnce({
+      type: "error",
+      error: new Error("no display"),
+    } as NotifyActionResult)
+
+    const log = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    }
+
+    await runSafePath({
+      command: "ls",
+      reason: "r",
+      countdownMs: 5_000,
+      sound: true,
+      log,
+    })
+
+    const resolvedCall = log.info.mock.calls.find(
+      (c) => c[0] === "safe-path: notification resolved",
+    )
+    expect(resolvedCall).toBeDefined()
+    const extra = resolvedCall?.[1] as Record<string, unknown> | undefined
+    expect(extra?.resultType).toBe("error")
+    expect(extra?.error).toBe("no display")
+  })
 })
