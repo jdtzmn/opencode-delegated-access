@@ -120,7 +120,11 @@ describe("classifyCommand", () => {
     expect(arg?.body?.model).toEqual(baseArgs.model)
     expect(typeof arg?.body?.system).toBe("string")
     expect(arg?.body?.system.length).toBeGreaterThan(20)
-    expect(arg?.body?.tools).toEqual({})
+    // `tools: { "*": false }` denies ALL tools for this prompt (the legacy
+    // `tools: {}` is interpreted as "no overrides" by opencode 1.4.x, which
+    // meant the classifier was actually getting the full tool registry and
+    // attempting to run the command it was supposed to judge).
+    expect(arg?.body?.tools).toEqual({ "*": false })
     expect(Array.isArray(arg?.body?.parts)).toBe(true)
     const firstPart = arg?.body?.parts?.[0]
     expect(firstPart?.type).toBe("text")

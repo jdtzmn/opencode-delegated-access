@@ -87,7 +87,14 @@ export async function classifyCommand(args: {
       body: {
         model,
         system: CLASSIFIER_SYSTEM_PROMPT,
-        tools: {},
+        // Deny ALL tools for this prompt. In opencode 1.4.x, `tools: {}` is
+        // interpreted as "no overrides" and the ephemeral session still
+        // receives the full tool registry — which the classifier has been
+        // observed to actually invoke (e.g. calling `bash` to run the very
+        // command it was supposed to merely classify). The wildcard `"*":
+        // false` form explicitly denies every tool via the server's
+        // permission ruleset.
+        tools: { "*": false },
         parts: [{ type: "text", text: userPrompt }],
       },
     } as never)
