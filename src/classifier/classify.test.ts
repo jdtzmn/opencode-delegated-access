@@ -203,6 +203,105 @@ describe("classifyCommand", () => {
     expect(calls.del).toHaveBeenCalledTimes(1)
   })
 
+  it("returns null even when the prompt resolves with a SAFE verdict after the timeout fires", async () => {
+    // Simulates the observed opencode 1.4.x race: the timeout fires and we
+    // call `session.abort`; opencode quiesces and the aborted prompt settles
+    // with partial text that happens to already contain "VERDICT: SAFE" from
+    // the model's pre-abort streaming. The prompt promise resolves *after*
+    // `timedOut` is set but potentially *before* `resolve(null)` runs inside
+    // the timer callback. classifyCommand must treat any such post-timeout
+    // resolution as a failure (fail-closed) and return null.
+    const { client, calls } = mockClient({
+      prompt: () =>
+        new Promise((resolve) => {
+          // Resolve with a plausible verdict shape 80ms in — safely after
+          // the 20ms timeout fires. This also exercises the case where the
+          // underlying client eventually resolves despite abort.
+          setTimeout(() => {
+            resolve({
+              data: {
+                info: {},
+                parts: [
+                  {
+                    type: "text",
+                    text: "VERDICT: SAFE\nREASON: leaked from partial stream",
+                  },
+                ],
+              },
+            })
+          }, 80)
+        }),
+    })
+
+    const result = await classifyCommand({
+      ...baseArgs,
+      client,
+      timeoutMs: 20,
+    })
+    expect(result).toBeNull()
+    // abort + delete must still both fire as cleanup
+    expect(calls.abort).toHaveBeenCalledTimes(1)
+    expect(calls.del).toHaveBeenCalledTimes(1)
+  })
+
+  it("returns null when the prompt resolves during the abort step (race window)", async () => {
+    // Reproduces the narrowest and most dangerous race observed in the
+    // 2026-04-18 session log: withTimeout's timer fires → `await
+    // client.session.abort(...)` runs → *while abort is in flight*, the
+    // original prompt promise resolves with a verdict (the opencode server
+    // flushed the pre-abort stream). In that window, `Promise.race` sees the
+    // prompt's value — not the timeout's `null` — because the timer
+    // callback hasn't reached its `resolve(null)` line yet.
+    //
+    // Without an explicit post-race `if (timedOut) return null` check, the
+    // plugin silently auto-approves a classifier run whose output was never
+    // validated as complete. This test enforces the fail-closed invariant.
+    const deferredPrompt: {
+      resolve: (value: unknown) => void
+    } = { resolve: () => {} }
+    const promptCalled = { fired: false }
+
+    const { client, calls } = mockClient({
+      prompt: () =>
+        new Promise((resolve) => {
+          promptCalled.fired = true
+          deferredPrompt.resolve = resolve
+        }),
+      abort: async () => {
+        // Resolve the prompt WHILE abort is still in flight, mimicking
+        // opencode flushing pre-abort buffers before the abort call returns.
+        deferredPrompt.resolve({
+          data: {
+            info: {},
+            parts: [
+              {
+                type: "text",
+                text: "VERDICT: SAFE\nREASON: leaked during abort",
+              },
+            ],
+          },
+        })
+        // Yield to the microtask queue so the prompt resolution lands before
+        // this abort-call settles.
+        await new Promise((r) => setTimeout(r, 5))
+        return { data: {} }
+      },
+    })
+
+    const result = await classifyCommand({
+      ...baseArgs,
+      client,
+      timeoutMs: 20,
+    })
+
+    expect(promptCalled.fired).toBe(true)
+    // Must be null: the prompt resolved on the timeout path, so the verdict
+    // is untrustworthy even though its text parses cleanly.
+    expect(result).toBeNull()
+    expect(calls.abort).toHaveBeenCalledTimes(1)
+    expect(calls.del).toHaveBeenCalledTimes(1)
+  })
+
   it("swallows delete errors (best-effort cleanup must not mask the verdict)", async () => {
     const { client } = mockClient({
       del: async () => {

@@ -100,6 +100,10 @@ export async function classifyCommand(args: {
     } as never)
 
     const response = (await withTimeout(promptCall, timeoutMs, async () => {
+      // Flip the gate BEFORE awaiting abort so that if the prompt promise
+      // settles during the abort call (a race observed on opencode 1.4.x
+      // where the server flushes pre-abort stream chunks on cancel), the
+      // post-race fail-closed check below can still discard it.
       timedOut = true
       // Await the abort so opencode's session.processor has a chance to
       // stop streaming BEFORE the finally-block deletes the session. If we
@@ -112,6 +116,14 @@ export async function classifyCommand(args: {
         // us from the common races.
       }
     })) as { data?: { parts?: Part[] } } | null
+
+    // Fail-closed gate: if the timeout fired at ANY point during the race,
+    // discard whatever the prompt promise returned. Partial pre-abort
+    // streams have been observed to contain well-formed "VERDICT: SAFE"
+    // text that would otherwise auto-approve a command whose classification
+    // never actually completed — violating the plugin's fail-closed
+    // contract (see README "How it's safe").
+    if (timedOut) return null
 
     if (!response) return null
 
