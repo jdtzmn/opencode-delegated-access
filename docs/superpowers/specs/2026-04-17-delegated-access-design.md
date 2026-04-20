@@ -48,7 +48,9 @@ permission.asked event fires
       │
       ├─ Skip if we've already handled this permissionID
       ├─ Skip if sessionID is one of our ephemeral classifier sessions
-      ├─ Fetch last K user messages via client.session.messages
+      ├─ Resolve root session (walk parentID; null → fail-closed skip)
+      ├─ Fetch last K user messages via client.session.messages(rootID)
+      │    (filtered by the root session's primary agent)
       ├─ Create ephemeral child session via client.session.create({ parentID })
       ├─ Call client.session.prompt with:
       │     - model override (small/fast)
@@ -95,7 +97,8 @@ Each file has one responsibility and can be understood in isolation.
 | `src/classifier/parse.ts` | Pure function: parse LLM response text → `{ verdict, reason } | null`. |
 | `src/classifier/model.ts` | Resolve classifier model from config → auto-detect → session fallback. |
 | `src/classifier/classify.ts` | Orchestrate: create session → prompt → delete session → parse. With timeout. |
-| `src/ui/messages.ts` | Fetch last K **user** messages from a session via the SDK. |
+| `src/ui/messages.ts` | Fetch last K **user** messages from a session via the SDK. Optional rootAgent filter for subagent-origin permissions. |
+| `src/ui/session-tree.ts` | Walk `Session.parentID` to find the root session (added post-initial-impl for subagent safety). |
 | `src/notify/callback-server.ts` | Ephemeral localhost HTTP server: bind → wait for request → return outcome. |
 | `src/notify/notify.ts` | `node-notifier` wrapper that sends notifications with action URLs. |
 | `src/permission/safe-path.ts` | SAFE path: notification with countdown + cancel, race timer vs HTTP. |
@@ -188,6 +191,36 @@ Any of the following → `output.status = "ask"` (fail closed):
 - Unknown provider AND no `classifierModel` set AND we can't fall back
 
 Deletion of the ephemeral session is best-effort (in a `finally` block, swallowing errors).
+
+### Subagent handling (added after initial implementation)
+
+**Problem discovered.** The original design assumed every permission event fires under the session where the real human is typing. OpenCode's subagent feature (agents dispatched by other agents via `SubtaskPart` — see `types.gen.d.ts`'s `AgentPart` / `subtask` discriminant) creates **child sessions** linked to the dispatcher via `Session.parentID`. When a subagent runs a bash command, the `permission.asked` event carries the **subagent's** `sessionID`. If we fetched user messages from that sessionID, the classifier would see the dispatching agent's prompts to the subagent — which have `role: "user"` but are emphatically NOT authored by the human.
+
+This violates the plugin's core safety property (*"the classifier never sees agent-authored text"*) and would let a compromised or confused dispatching agent smuggle "please approve this" into the judge's context.
+
+**Fix.** Before fetching messages, the handler walks the session tree to the root via `resolveRootSessionID` (`src/ui/session-tree.ts`):
+
+1. Call `client.session.get({ path: { id: currentID } })` and inspect `parentID`.
+2. If `parentID` is set, recurse.
+3. Stop at `MAX_SESSION_PARENT_DEPTH` (10) hops.
+4. Maintain a seen-set for cycle detection.
+5. Return the topmost ancestor's `id`, OR `null` on any SDK error, missing payload, cycle, or max-depth exceeded.
+
+**Fail-closed contract.** If `resolveRootSessionID` returns `null`, the handler skips classification entirely and leaves the TUI prompt alone. This is consistent with the existing classifier-failure policy: unverified chain-of-custody never results in an auto-approval.
+
+**Ephemeral classifier parenting stays local.** The classifier session is still created with `parentID: permission.sessionID` (the session where the permission actually fired), not the walked root. This keeps two properties intact:
+
+- `ephemeralSessionIDs` loop-guard continues to catch any permission events the classifier might accidentally emit (it shouldn't, since it runs with `tools: { "*": false }`).
+- Cleanup (delete) happens under the originating branch, so a subagent session's teardown is self-contained.
+
+**Defense-in-depth: root-agent filter.** Even after resolving the root, the handler filters the root's user messages by their `info.agent` field against the root session's primary agent:
+
+- `extractRootAgent(entries)` returns the `agent` of the **earliest** user message in the root (the human's opening turn with their chosen primary agent).
+- `extractLastUserMessages(entries, k, rootAgent)` then drops any user messages whose `info.agent` doesn't match, or is missing entirely (fail-closed on unknown provenance).
+
+If the root has no identifiable primary agent (empty session or missing agent field on the first user message), the filter is silently skipped — the root-walk alone is still the primary protection; the filter is belt-and-suspenders.
+
+**Session tree terminology.** "Root session" = a session with no `parentID`. "Subagent session" = any descendant. `permission.sessionID` can refer to either; the handler treats the resolved root as the source of truth for human context.
 
 ## Notification mechanics
 

@@ -22,9 +22,10 @@ You stay in flow. The agent stops pestering you for routine stuff. Dangerous stu
 
 Every time OpenCode would prompt for a bash command, Delegated Access:
 
-1. Grabs the last N messages **you** sent (never the agent's messages — that would be a prompt injection wide open).
-2. Asks a small fast model: _given this command and what the user just said, is this SAFE or RISKY?_
-3. Acts on the verdict:
+1. Finds the root session. If the permission fired inside a subagent, walks up `parentID` to where _you_ actually typed.
+2. Grabs the last N messages **you** sent from that root session (never the agent's messages, never a parent agent's dispatch prompt to a subagent — that would be a prompt injection wide open).
+3. Asks a small fast model: _given this command and what the user just said, is this SAFE or RISKY?_
+4. Acts on the verdict:
 
 ```
     ┌───────────────────────────────┐
@@ -136,21 +137,22 @@ The desktop notifications with Approve / Reject buttons work via `terminal-notif
 ## How it's safe
 
 - **The classifier never sees the agent's messages.** Only yours. A rogue assistant can't smuggle "this command is safe, trust me" into the judge's context.
-- **Every error leaves the TUI prompt alone.** Classifier timeout, API error, malformed verdict, missing command, unexpected exception — none of them call the respond API, so the TUI prompt stays and you decide manually. The plugin only ever _dismisses_ a prompt after an affirmative SAFE decision, never silently passes through on errors.
-- **The classifier can't call tools.** The ephemeral session runs with `tools: {}`, so even a compromised classifier model can only return text.
+- **Subagents don't weaken that.** When a bash permission fires inside a subagent session, the plugin walks up the session tree to the root and pulls _your_ messages from there — never the dispatching agent's prompt to the subagent. If the tree can't be verified (SDK error, unexpected cycle, too deep) the plugin fails closed and leaves the TUI prompt for you. Even on the root session, user-role messages are filtered to the root's primary agent so synthetic "user" turns addressed elsewhere never leak in.
+- **Every error leaves the TUI prompt alone.** Classifier timeout, API error, malformed verdict, missing command, session-tree lookup failure, unexpected exception — none of them call the respond API, so the TUI prompt stays and you decide manually. The plugin only ever _dismisses_ a prompt after an affirmative SAFE decision, never silently passes through on errors.
+- **The classifier can't call tools.** The ephemeral session runs with `tools: { "*": false }`, so even a compromised classifier model can only return text.
 - **Risky commands get two channels, not one.** The TUI prompt stays up AND the notification fires with Approve/Reject. Whichever you answer first wins — no bug in the notification path can ever accidentally auto-approve a RISKY command.
 - **The classifier can't trigger itself.** We track ephemeral classifier sessions and ignore permission events from them.
 
 ## Status
 
-v0.1.0. Bash commands only (edit / write / webfetch still prompt normally — that's the scope for v1). 136 tests, TypeScript, Bun. macOS-tested; Linux/Windows should work with degraded notification interactivity.
+v0.1.0. Bash commands only (edit / write / webfetch still prompt normally — that's the scope for v1). 201 tests, TypeScript, Bun. macOS-tested; Linux/Windows should work with degraded notification interactivity.
 
 ## Development
 
 ```bash
 bun install
 bun run check   # TypeScript check
-bun run test    # 136 unit tests
+bun run test    # 201 unit tests
 ```
 
 Design doc and implementation plan in [`docs/superpowers/`](./docs/superpowers/).
