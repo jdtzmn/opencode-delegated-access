@@ -14,6 +14,12 @@ vi.mock("../ui/messages.ts", async (importOriginal) => {
     getSessionMessages: vi.fn(),
   }
 })
+// `resolveRootSessionID` walks the session parent chain via the SDK; mock
+// it so handler tests control what "root" sessionID the handler sees
+// without having to stub session.get on the client object.
+vi.mock("../ui/session-tree.ts", () => ({
+  resolveRootSessionID: vi.fn(),
+}))
 vi.mock("./safe-path.ts", () => ({
   runSafePath: vi.fn(),
 }))
@@ -23,6 +29,7 @@ vi.mock("./risky-path.ts", () => ({
 
 import { classifyCommand } from "../classifier/classify.ts"
 import { getSessionMessages, type MessageEntry } from "../ui/messages.ts"
+import { resolveRootSessionID } from "../ui/session-tree.ts"
 import { runSafePath } from "./safe-path.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
 import { handlePermissionEvent } from "./handler.ts"
@@ -30,6 +37,7 @@ import { DEFAULT_CONFIG } from "../config.ts"
 
 const mockedClassify = vi.mocked(classifyCommand)
 const mockedGetSessionMessages = vi.mocked(getSessionMessages)
+const mockedResolveRoot = vi.mocked(resolveRootSessionID)
 const mockedSafe = vi.mocked(runSafePath)
 const mockedRisky = vi.mocked(runRiskyPathInBackground)
 
@@ -118,6 +126,7 @@ function buildCtx(overrides: Partial<{
 beforeEach(() => {
   mockedClassify.mockReset()
   mockedGetSessionMessages.mockReset()
+  mockedResolveRoot.mockReset()
   mockedSafe.mockReset()
   mockedRisky.mockReset()
   // Default: one user message, no assistant messages. Tests that need
@@ -125,6 +134,10 @@ beforeEach(() => {
   mockedGetSessionMessages.mockResolvedValue([
     userEntry("please check the repo"),
   ])
+  // Default: treat the permission's own sessionID as the root (i.e. not
+  // a subagent). Subagent tests override this to return a different
+  // sessionID. Fail-closed tests override it to return null.
+  mockedResolveRoot.mockImplementation(async (_client, sessionID) => sessionID)
 })
 
 function basePermission(overrides: Record<string, unknown> = {}) {
@@ -620,5 +633,114 @@ describe("handlePermissionEvent", () => {
       providerID: "anthropic",
       modelID: "claude-haiku-4-5",
     })
+  })
+
+  // --- subagent handling ------------------------------------------------
+  //
+  // When a bash permission fires inside a subagent session, the handler
+  // must resolve the session's root (via resolveRootSessionID) and fetch
+  // user messages from THERE, not from the subagent session — whose
+  // "user" role entries are actually the dispatching agent's prompts.
+  // Any failure to resolve a root is fail-closed: the handler skips
+  // classification and leaves the TUI prompt alone for the user.
+
+  it("fetches messages from the ROOT session when permission fires in a subagent", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    // Simulate: permission arrives with the subagent's sessionID; resolver
+    // walks up and returns the root sessionID.
+    mockedResolveRoot.mockImplementationOnce(async () => "sess_root")
+
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(
+      basePermission({ sessionID: "sess_subagent" }),
+      ctx,
+    )
+
+    expect(mockedResolveRoot).toHaveBeenCalledTimes(1)
+    expect(mockedResolveRoot.mock.calls[0]?.[1]).toBe("sess_subagent")
+
+    // Messages must come from the ROOT session, not the subagent.
+    expect(mockedGetSessionMessages).toHaveBeenCalledTimes(1)
+    expect(mockedGetSessionMessages.mock.calls[0]?.[1]).toBe("sess_root")
+  })
+
+  it("fetches messages from the permission's own sessionID for a root session", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    // Default beforeEach behaviour: resolver returns the input sessionID
+    // unchanged (i.e. already a root). No override needed.
+
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(
+      basePermission({ sessionID: "sess_root_only" }),
+      ctx,
+    )
+
+    expect(mockedGetSessionMessages).toHaveBeenCalledTimes(1)
+    expect(mockedGetSessionMessages.mock.calls[0]?.[1]).toBe("sess_root_only")
+  })
+
+  it("skips classification and does not call getSessionMessages when resolver returns null", async () => {
+    // Resolver fail-closed: subagent's chain couldn't be verified.
+    mockedResolveRoot.mockImplementationOnce(async () => null)
+
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(
+      basePermission({ sessionID: "sess_subagent" }),
+      ctx,
+    )
+
+    // No message fetch, no classification, no response.
+    expect(mockedGetSessionMessages).not.toHaveBeenCalled()
+    expect(mockedClassify).not.toHaveBeenCalled()
+    expect(mockedSafe).not.toHaveBeenCalled()
+    expect(mockedRisky).not.toHaveBeenCalled()
+    expect(respondCall).not.toHaveBeenCalled()
+  })
+
+  it("keeps the permission's ORIGINAL sessionID as the classifier's parentSessionID", async () => {
+    // Even when the resolver discovers a different root, the ephemeral
+    // classifier session should be parented at the permission's session
+    // (the subagent's), so the ephemeralSessionIDs loop-guard keeps
+    // working and cleanup happens under the originating branch.
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+    mockedResolveRoot.mockImplementationOnce(async () => "sess_root")
+
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(
+      basePermission({ sessionID: "sess_subagent" }),
+      ctx,
+    )
+
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(classifyArgs?.parentSessionID).toBe("sess_subagent")
+  })
+
+  it("classifier sees the ROOT session's user messages, not the subagent's", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+    mockedResolveRoot.mockImplementationOnce(async () => "sess_root")
+
+    // Tell getSessionMessages to return DIFFERENT message sets depending
+    // on which sessionID is requested. The handler should request
+    // `sess_root` (the resolved root), so the classifier must see the
+    // root's human messages — not the subagent's dispatch prompt.
+    mockedGetSessionMessages.mockImplementation(async (_client, id) => {
+      if (id === "sess_root") return [userEntry("the real human said this")]
+      return [userEntry("dispatching agent's prompt to subagent")]
+    })
+
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(
+      basePermission({ sessionID: "sess_subagent" }),
+      ctx,
+    )
+
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(classifyArgs?.userMessages).toEqual(["the real human said this"])
   })
 })

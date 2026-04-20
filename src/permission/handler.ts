@@ -7,6 +7,7 @@ import {
 } from "../ui/messages.ts"
 import { classifyCommand } from "../classifier/classify.ts"
 import { resolveClassifierModel, type ModelRef } from "../classifier/model.ts"
+import { resolveRootSessionID } from "../ui/session-tree.ts"
 import { runSafePath } from "./safe-path.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
 import type { Logger } from "../log.ts"
@@ -123,13 +124,46 @@ export async function handlePermissionEvent(
     return
   }
 
-  // Fetch the session's messages once: the classifier context needs the
-  // last K user messages, and we derive a session-model fallback from the
-  // most recent assistant message (used when the `config` hook hasn't run
-  // or didn't surface a model).
+  // Resolve the ROOT session.
+  //
+  // When a bash permission fires inside a subagent session, the
+  // permission's sessionID points at the subagent — whose "user" role
+  // messages are actually the dispatching agent's prompts to the
+  // subagent, NOT the real human's messages. Classifying against those
+  // would violate the plugin's core safety property ("classifier never
+  // sees the agent's messages"), so we walk up the parentID chain to
+  // find the root session and pull human messages from there.
+  //
+  // Fail-closed: if the resolver returns null (SDK error, cycle, max
+  // depth exceeded, missing payload) we abort classification and leave
+  // the TUI prompt alone. The user approves manually.
+  const rootSessionID = await resolveRootSessionID(
+    ctx.client,
+    permission.sessionID,
+  )
+  if (rootSessionID === null) {
+    log.warn(
+      "skip: could not resolve root session (fail-closed to TUI prompt)",
+      base,
+    )
+    return
+  }
+  if (rootSessionID !== permission.sessionID) {
+    log.info("resolved subagent to root session", {
+      ...base,
+      permissionSessionID: permission.sessionID,
+      rootSessionID,
+    })
+  }
+
+  // Fetch the ROOT session's messages once: the classifier context needs
+  // the last K user messages, and we derive a session-model fallback from
+  // the most recent assistant message (used when the `config` hook hasn't
+  // run or didn't surface a model). Inside a subagent the root's messages
+  // are the ones authored by the real human.
   let entries
   try {
-    entries = await getSessionMessages(ctx.client, permission.sessionID)
+    entries = await getSessionMessages(ctx.client, rootSessionID)
   } catch (e) {
     log.error("getSessionMessages failed", {
       ...base,
