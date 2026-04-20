@@ -3,6 +3,7 @@ import type { DelegatedAccessConfig } from "../config.ts"
 import {
   extractLastUserMessages,
   extractLatestAssistantModel,
+  extractRootAgent,
   getSessionMessages,
 } from "../ui/messages.ts"
 import { classifyCommand } from "../classifier/classify.ts"
@@ -172,9 +173,24 @@ export async function handlePermissionEvent(
     return
   }
 
+  // Defense-in-depth: anchor user-message extraction to the root
+  // session's primary agent. If the root has no identifiable primary
+  // agent (e.g. empty session, or first user message missing its agent
+  // field), the filter is skipped and extraction falls back to its
+  // plain behaviour — the root-walk itself is still the primary
+  // protection against subagent confusion.
+  const rootAgent = extractRootAgent(entries)
+  if (rootAgent === null && entries.length > 0) {
+    log.warn("could not identify root session's primary agent; filter skipped", {
+      ...base,
+      rootSessionID,
+    })
+  }
+
   const userMessages = extractLastUserMessages(
     entries,
     ctx.config.contextMessageCount,
+    rootAgent ?? undefined,
   )
   const fallbackModel = extractLatestAssistantModel(entries)
 

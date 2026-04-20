@@ -33,22 +33,59 @@ function messageText(entry: MessageEntry): string {
  * Messages with no text content after filtering (e.g. a user that uploaded an
  * image with no caption) are skipped entirely so they don't appear as empty
  * strings in the classifier prompt.
+ *
+ * When `rootAgent` is provided, only include user messages whose
+ * `info.agent` matches exactly. Messages with a missing or non-string
+ * `info.agent` are also excluded (fail-closed on unknown provenance).
+ * This is defense-in-depth: even after walking to the root session we
+ * want the classifier to see only messages the real human addressed to
+ * their chosen primary agent — never synthetic dispatches that might
+ * have landed under the user role.
  */
 export function extractLastUserMessages(
   entries: MessageEntry[],
   k: number,
+  rootAgent?: string,
 ): string[] {
   if (k <= 0) return []
 
   const userTexts: string[] = []
   for (const entry of entries) {
     if (entry.info.role !== "user") continue
+    if (rootAgent !== undefined) {
+      const agent = (entry.info as unknown as { agent?: unknown }).agent
+      if (typeof agent !== "string" || agent !== rootAgent) continue
+    }
     const text = messageText(entry)
     if (text.length === 0) continue
     userTexts.push(text)
   }
 
   return userTexts.slice(-k)
+}
+
+/**
+ * Pure function: return the `info.agent` of the EARLIEST user message in
+ * the given entries, or `null` if none have a usable string agent.
+ *
+ * Rationale: the first user message in a session is the human's opening
+ * turn with the primary agent. That message's `agent` field is therefore
+ * the authoritative name of the root session's primary agent. Later user
+ * messages may drift (e.g. synthetic dispatches, system-injected turns)
+ * and must not be trusted for this purpose.
+ *
+ * Used by the handler to anchor the `rootAgent` filter on
+ * {@link extractLastUserMessages} when walking a subagent's permission
+ * up to its root session.
+ */
+export function extractRootAgent(entries: MessageEntry[]): string | null {
+  for (const entry of entries) {
+    if (entry.info.role !== "user") continue
+    const agent = (entry.info as unknown as { agent?: unknown }).agent
+    if (typeof agent === "string" && agent.length > 0) return agent
+    // Earliest user has no usable agent — keep looking forward for one.
+  }
+  return null
 }
 
 /**

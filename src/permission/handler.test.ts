@@ -743,4 +743,54 @@ describe("handlePermissionEvent", () => {
     const classifyArgs = mockedClassify.mock.calls[0]?.[0]
     expect(classifyArgs?.userMessages).toEqual(["the real human said this"])
   })
+
+  // --- root-agent filter -----------------------------------------------
+  //
+  // Defense-in-depth: even from the resolved root session, only user
+  // messages whose `info.agent` matches the root's primary agent should
+  // flow to the classifier. This catches any "user" role entries that
+  // might actually be synthetic dispatches addressed to other agents.
+
+  it("filters root user messages by the root session's primary agent", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    // Root session: first user message is with the "build" agent (the
+    // human's chosen primary). A later "general"-agent user message is
+    // synthetic and must be filtered out.
+    const buildUser = (text: string, agent: string): MessageEntry => ({
+      info: {
+        id: `u_${text}`,
+        sessionID: "sess_root",
+        role: "user",
+        time: { created: 0 },
+        agent,
+      } as unknown as MessageEntry["info"],
+      parts: [
+        {
+          id: `p_${text}`,
+          sessionID: "sess_root",
+          messageID: `u_${text}`,
+          type: "text",
+          text,
+        } as MessageEntry["parts"][number],
+      ],
+    })
+
+    mockedGetSessionMessages.mockResolvedValueOnce([
+      buildUser("real-human-1", "build"),
+      buildUser("synthetic-dispatch", "general"),
+      buildUser("real-human-2", "build"),
+    ])
+
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(basePermission(), ctx)
+
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    // Only the "build"-agent messages reach the classifier.
+    expect(classifyArgs?.userMessages).toEqual([
+      "real-human-1",
+      "real-human-2",
+    ])
+  })
 })
