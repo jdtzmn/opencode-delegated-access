@@ -35,6 +35,7 @@ import { runSafePath } from "./safe-path.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
 import { handlePermissionEvent } from "./handler.ts"
 import { DirectoryVerdictCache } from "./directory-cache.ts"
+import { SafePathBatcher } from "./safe-path-batcher.ts"
 import { DEFAULT_CONFIG } from "../config.ts"
 
 const mockedClassify = vi.mocked(classifyCommand)
@@ -122,6 +123,12 @@ function buildCtx(overrides: Partial<{
         : { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
     ephemeralSessionIDs: new Set<string>(),
     directoryVerdictCache: new DirectoryVerdictCache(),
+    safePathBatcher: new SafePathBatcher({
+      batchWindowMs: 0, // flush immediately in tests (runSafePath is mocked anyway)
+      sendNotification: async () => ({ type: "timeout" as const }),
+      countdownMs: DEFAULT_CONFIG.safeCountdownMs,
+      sound: false,
+    }),
     log,
   }
   return { ctx, respondCall, log }

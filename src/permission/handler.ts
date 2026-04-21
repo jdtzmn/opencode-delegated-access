@@ -18,6 +18,7 @@ import {
 } from "../classifier/prompt.ts"
 import { DirectoryVerdictCache } from "./directory-cache.ts"
 import { runSafePath } from "./safe-path.ts"
+import type { SafePathBatcher } from "./safe-path-batcher.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
 import type { Logger } from "../log.ts"
 
@@ -58,6 +59,12 @@ export type HandlerContext = {
    * permission events so burst requests for the same path skip the LLM call.
    */
   directoryVerdictCache: DirectoryVerdictCache
+  /**
+   * Shared batcher for SAFE-path notifications. Coalesces concurrent
+   * notifications (e.g. burst external_directory requests) into a single
+   * macOS notification so they don't cancel each other out.
+   */
+  safePathBatcher: SafePathBatcher
   /** Logger for diagnostic output. */
   log: Logger
 }
@@ -412,6 +419,7 @@ async function runSafeOrRiskyPath(args: {
       countdownMs: ctx.config.safeCountdownMs,
       sound: ctx.config.notificationSound,
       log,
+      batcher: ctx.safePathBatcher,
     })
     log.info("safe-path returned", { ...base, decision })
     if (decision === "allow") {

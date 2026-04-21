@@ -7,6 +7,7 @@ vi.mock("../notify/notify.ts", () => ({
 
 import { sendNotification } from "../notify/notify.ts"
 import { runSafePath } from "./safe-path.ts"
+import { SafePathBatcher } from "./safe-path-batcher.ts"
 import type { NotifyActionResult } from "../notify/notify.ts"
 
 const mockedSend = vi.mocked(sendNotification)
@@ -195,5 +196,80 @@ describe("runSafePath", () => {
     const extra = resolvedCall?.[1] as Record<string, unknown> | undefined
     expect(extra?.resultType).toBe("error")
     expect(extra?.error).toBe("no display")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// runSafePath with batcher
+// ---------------------------------------------------------------------------
+
+describe("runSafePath (batcher delegation)", () => {
+  it("delegates to batcher.enqueue when a batcher is supplied", async () => {
+    const batcher = {
+      enqueue: vi.fn(async () => "allow" as const),
+    } as unknown as SafePathBatcher
+
+    const result = await runSafePath({
+      command: "ls",
+      reason: "read-only",
+      countdownMs: 5_000,
+      sound: true,
+      batcher,
+    })
+
+    expect(result).toBe("allow")
+    expect(batcher.enqueue).toHaveBeenCalledWith("ls")
+    // sendNotification must NOT be called directly when a batcher is present.
+    expect(mockedSend).not.toHaveBeenCalled()
+  })
+
+  it("passes the command as the subject to batcher.enqueue", async () => {
+    const batcher = {
+      enqueue: vi.fn(async () => "ask" as const),
+    } as unknown as SafePathBatcher
+
+    await runSafePath({
+      command: "rm test.md",
+      reason: "user asked",
+      countdownMs: 5_000,
+      sound: false,
+      batcher,
+    })
+
+    expect(batcher.enqueue).toHaveBeenCalledWith("rm test.md")
+  })
+
+  it("still returns 'allow' immediately for countdownMs=0 without touching the batcher", async () => {
+    const batcher = {
+      enqueue: vi.fn(async () => "ask" as const),
+    } as unknown as SafePathBatcher
+
+    const result = await runSafePath({
+      command: "ls",
+      reason: "r",
+      countdownMs: 0,
+      sound: false,
+      batcher,
+    })
+
+    expect(result).toBe("allow")
+    expect(batcher.enqueue).not.toHaveBeenCalled()
+    expect(mockedSend).not.toHaveBeenCalled()
+  })
+
+  it("returns whatever outcome batcher.enqueue resolves to", async () => {
+    const batcher = {
+      enqueue: vi.fn(async () => "ask" as const),
+    } as unknown as SafePathBatcher
+
+    const result = await runSafePath({
+      command: "suspicious cmd",
+      reason: "r",
+      countdownMs: 5_000,
+      sound: true,
+      batcher,
+    })
+
+    expect(result).toBe("ask")
   })
 })

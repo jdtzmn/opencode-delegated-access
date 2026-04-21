@@ -1,5 +1,6 @@
 import { sendNotification } from "../notify/notify.ts"
 import type { Logger } from "../log.ts"
+import type { SafePathBatcher } from "./safe-path-batcher.ts"
 
 /** The decision returned to the permission.ask hook. */
 export type SafePathOutcome = "allow" | "ask"
@@ -33,6 +34,15 @@ const COMMAND_DISPLAY_MAX = 180
  * the switch actually ran — the 2026-04-18 investigation revealed a silent
  * `type: "error"` fall-through that looked indistinguishable from a
  * working auto-approve in the log.
+ *
+ * ## Batcher
+ *
+ * When multiple SAFE permissions arrive within milliseconds of each other
+ * (e.g. an agent accessing several sub-directories of an external repo),
+ * posting a notification per permission causes macOS to cancel the earlier
+ * ones as each new notification displaces the last. Pass a {@link SafePathBatcher}
+ * to coalesce concurrent notifications into a single one so all items in a
+ * burst share one countdown and one user decision.
  */
 export async function runSafePath(args: {
   command: string
@@ -41,12 +51,25 @@ export async function runSafePath(args: {
   sound: boolean
   /** Optional logger; when omitted (e.g. from unit tests) no logs are emitted. */
   log?: Logger
+  /**
+   * Optional batcher for coalescing concurrent notifications. When present,
+   * the notification is managed by the batcher rather than sent directly.
+   * The batcher accumulates `command` values within its batch window and
+   * fires a single notification for the group.
+   */
+  batcher?: SafePathBatcher
 }): Promise<SafePathOutcome> {
-  const { command, countdownMs, sound, log } = args
+  const { command, countdownMs, sound, log, batcher } = args
 
   if (countdownMs <= 0) {
     log?.info("safe-path: silent instant-allow", { countdownMs })
     return "allow"
+  }
+
+  // When a batcher is provided, delegate entirely to it. The batcher handles
+  // its own logging and notification lifecycle.
+  if (batcher) {
+    return batcher.enqueue(command)
   }
 
   const timeoutSec = Math.max(1, Math.ceil(countdownMs / 1000))

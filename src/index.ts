@@ -7,6 +7,8 @@ import {
   type HandlerOutput,
 } from "./permission/handler.ts"
 import { DirectoryVerdictCache } from "./permission/directory-cache.ts"
+import { SafePathBatcher } from "./permission/safe-path-batcher.ts"
+import { sendNotification } from "./notify/notify.ts"
 import type { ModelRef } from "./classifier/model.ts"
 import { createLogger, type Logger } from "./log.ts"
 
@@ -63,6 +65,25 @@ const DelegatedAccess: Plugin = async ({ client }) => {
   // rapid-fire permission events on the same session.
   const directoryVerdictCache = new DirectoryVerdictCache()
 
+  // Shared batcher for SAFE-path notifications. A single instance means all
+  // concurrent permission events funnel through the same 200ms batch window,
+  // so bursts (e.g. agent accessing 3 sub-directories at once) produce one
+  // macOS notification instead of N notifications that cancel each other.
+  //
+  // The batcher is constructed lazily-ish here with the initial config
+  // defaults. If the user changes safeCountdownMs or notificationSound mid-
+  // session via the config hook, the batcher won't pick that up automatically.
+  // In practice both fields are set at startup and never change, so this is
+  // fine. If dynamic reconfig ever becomes necessary, the batcher can be
+  // recreated in the config hook.
+  const safePathBatcher = new SafePathBatcher({
+    batchWindowMs: 200,
+    sendNotification,
+    countdownMs: config.safeCountdownMs,
+    sound: config.notificationSound,
+    log,
+  })
+
   // Permissions we've already handled, shared across all three hooks so
   // each permissionID is classified once no matter which hook(s) fire.
   const handledPermissionIDs = new Set<string>()
@@ -91,6 +112,7 @@ const DelegatedAccess: Plugin = async ({ client }) => {
       sessionModel,
       ephemeralSessionIDs,
       directoryVerdictCache,
+      safePathBatcher,
       log,
     }
   }
