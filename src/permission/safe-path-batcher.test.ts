@@ -256,3 +256,143 @@ describe("SafePathBatcher batch cancel", () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Flushing guard — items arriving while a notification is in-flight must not
+// trigger a second concurrent notification (the core macOS race condition)
+// ---------------------------------------------------------------------------
+
+describe("SafePathBatcher flushing guard", () => {
+  it("does not start a second notification while the first is still active", async () => {
+    vi.useFakeTimers()
+
+    // Each call to send gets its own manually-resolved promise so we can
+    // sequence them precisely.
+    const resolvers: Array<(r: NotifyActionResult) => void> = []
+    const send = vi.fn(
+      () =>
+        new Promise<NotifyActionResult>((resolve) => {
+          resolvers.push(resolve)
+        }),
+    )
+
+    const batcher = new SafePathBatcher({
+      batchWindowMs: 200,
+      sendNotification: send as SafePathBatcher["sendNotification"],
+      countdownMs: 5_000,
+      sound: false,
+    })
+
+    // First item: flushes after batch window
+    const p1 = batcher.enqueue("port/*")
+    vi.advanceTimersByTime(200)
+    await vi.runAllTimersAsync()
+
+    // Notification 1 is now in-flight
+    expect(send).toHaveBeenCalledTimes(1)
+
+    // Second item arrives while first notification is still active
+    const p2 = batcher.enqueue("wc -l port/src/**")
+    // Even after another batch window, no second notification should fire
+    vi.advanceTimersByTime(200)
+    await vi.runAllTimersAsync()
+
+    // Still only one call — the second item is queued, not flushed
+    expect(send).toHaveBeenCalledTimes(1)
+
+    // Resolve the first notification; this should trigger flush for p2
+    resolvers[0]!({ type: "timeout" })
+    await vi.runAllTimersAsync()
+
+    // Now the second item should have triggered a second notification
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(await p1).toBe("allow")
+
+    // Resolve the second notification
+    resolvers[1]!({ type: "timeout" })
+    await vi.runAllTimersAsync()
+    expect(await p2).toBe("allow")
+  })
+
+  it("accumulates items that arrive during an active notification into a single follow-up notification", async () => {
+    vi.useFakeTimers()
+
+    const resolvers: Array<(r: NotifyActionResult) => void> = []
+    const send = vi.fn(
+      () =>
+        new Promise<NotifyActionResult>((resolve) => {
+          resolvers.push(resolve)
+        }),
+    )
+
+    const batcher = new SafePathBatcher({
+      batchWindowMs: 200,
+      sendNotification: send as SafePathBatcher["sendNotification"],
+      countdownMs: 5_000,
+      sound: false,
+    })
+
+    // First flush
+    batcher.enqueue("item-1")
+    vi.advanceTimersByTime(200)
+    await vi.runAllTimersAsync()
+    expect(send).toHaveBeenCalledTimes(1)
+
+    // Three more items arrive while notification 1 is in-flight
+    const p2 = batcher.enqueue("item-2")
+    const p3 = batcher.enqueue("item-3")
+    const p4 = batcher.enqueue("item-4")
+
+    // Resolve notification 1 — should trigger one combined notification for 2+3+4
+    resolvers[0]!({ type: "timeout" })
+    await vi.runAllTimersAsync()
+
+    // All three queued items should fire in ONE combined notification (#2)
+    expect(send).toHaveBeenCalledTimes(2)
+    const secondCallArgs = (send.mock.calls as unknown as NotifyArgs[][])[1]?.[0]
+    expect(secondCallArgs?.message).toMatch(/\(\+2 more\)/)
+
+    // Resolve notification 2
+    resolvers[1]!({ type: "timeout" })
+    await vi.runAllTimersAsync()
+    expect(await p2).toBe("allow")
+    expect(await p3).toBe("allow")
+    expect(await p4).toBe("allow")
+  })
+
+  it("items queued during a cancelled notification still get their own follow-up", async () => {
+    vi.useFakeTimers()
+
+    const send = vi.fn()
+    let resolveFirst!: (r: NotifyActionResult) => void
+    send.mockImplementationOnce(
+      () =>
+        new Promise<NotifyActionResult>((resolve) => {
+          resolveFirst = resolve
+        }),
+    )
+    send.mockResolvedValue({ type: "timeout" } as NotifyActionResult)
+
+    const batcher = new SafePathBatcher({
+      batchWindowMs: 200,
+      sendNotification: send as SafePathBatcher["sendNotification"],
+      countdownMs: 5_000,
+      sound: false,
+    })
+
+    batcher.enqueue("item-1")
+    vi.advanceTimersByTime(200)
+    await vi.runAllTimersAsync()
+    expect(send).toHaveBeenCalledTimes(1)
+
+    const p2 = batcher.enqueue("item-2")
+
+    // Notification 1 is cancelled
+    resolveFirst({ type: "cancel" })
+    await vi.runAllTimersAsync()
+
+    // item-2 still gets its own notification
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(await p2).toBe("allow") // timeout on follow-up
+  })
+})

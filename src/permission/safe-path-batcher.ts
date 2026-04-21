@@ -54,6 +54,13 @@ export class SafePathBatcher {
 
   private pending: PendingItem[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * True while a `sendNotification` call is in-flight (i.e. a notification is
+   * currently visible to the user). When true, new items are queued but no
+   * new notification is started — macOS cancels the earlier notification when
+   * a new one is posted, which the plugin misinterprets as a user cancellation.
+   */
+  private flushing = false
 
   constructor(args: {
     batchWindowMs: number
@@ -84,6 +91,10 @@ export class SafePathBatcher {
     return new Promise<SafePathOutcome>((resolve) => {
       this.pending.push({ subject, resolve })
 
+      // If a notification is already on screen, don't start another timer —
+      // the in-flight flush will drain the pending queue when it finishes.
+      if (this.flushing) return
+
       if (this.timer === null) {
         this.timer = setTimeout(() => this.flush(), this.batchWindowMs)
       }
@@ -96,6 +107,8 @@ export class SafePathBatcher {
 
     const items = this.pending.splice(0) // drain
     if (items.length === 0) return
+
+    this.flushing = true
 
     const timeoutSec = Math.max(1, Math.ceil(this.countdownMs / 1000))
     const message = this.buildMessage(items, timeoutSec)
@@ -131,6 +144,16 @@ export class SafePathBatcher {
         // hanging forever.
         for (const item of items) {
           item.resolve("allow")
+        }
+      })
+      .finally(() => {
+        // Notification has settled (timeout, cancel, click, or error). Clear
+        // the flushing flag and immediately drain any items that accumulated
+        // while the notification was on screen — all of them go into one
+        // combined follow-up notification.
+        this.flushing = false
+        if (this.pending.length > 0) {
+          this.flush()
         }
       })
   }
