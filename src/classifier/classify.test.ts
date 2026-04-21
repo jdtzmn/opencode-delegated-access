@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest"
-import { classifyCommand } from "./classify.ts"
+import { classifyCommand, classifySubject } from "./classify.ts"
 import type { Verdict } from "./parse.ts"
 
 /**
@@ -389,5 +389,62 @@ describe("classifyCommand", () => {
 
     expect(created).not.toHaveBeenCalled()
     expect(deleted).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// classifySubject — verifies the generic API surface used by non-bash callers
+// (e.g. the external_directory handler). We only cover the delta vs
+// classifyCommand; the full suite above already exercises the shared session
+// lifecycle, timeout, and parse paths.
+// ---------------------------------------------------------------------------
+describe("classifySubject", () => {
+  const subjectBaseArgs = {
+    subject: "/Users/jacob/Documents/GitHub/premind/*",
+    userMessages: ["please check the premind repo"],
+    parentSessionID: "sess_parent",
+    model: { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+    timeoutMs: 5_000,
+    systemPrompt: "You are a test classifier. Output VERDICT: SAFE\nREASON: ok",
+    buildUserPrompt: ({ subject, userMessages }: { subject: string; userMessages: string[] }) =>
+      `subject=${subject} messages=${userMessages.join(",")}`,
+  }
+
+  it("passes the caller-supplied system prompt to session.prompt", async () => {
+    const { client, calls } = mockClient({})
+    await classifySubject({ ...subjectBaseArgs, client })
+    const body = calls.prompt.mock.calls[0]?.[0]?.body
+    expect(body?.system).toBe(subjectBaseArgs.systemPrompt)
+  })
+
+  it("passes the buildUserPrompt output as the first text part", async () => {
+    const { client, calls } = mockClient({})
+    await classifySubject({ ...subjectBaseArgs, client })
+    const parts = calls.prompt.mock.calls[0]?.[0]?.body?.parts ?? []
+    const textPart = parts.find((p: { type: string }) => p.type === "text")
+    expect(textPart?.text).toContain(subjectBaseArgs.subject)
+  })
+
+  it("returns SAFE when the LLM response contains VERDICT: SAFE", async () => {
+    const { client } = mockClient({
+      prompt: async () => ({
+        data: {
+          info: {},
+          parts: [{ type: "text", text: "VERDICT: SAFE\nREASON: user asked for this dir" }],
+        },
+      }),
+    })
+    const result = await classifySubject({ ...subjectBaseArgs, client })
+    expect(result).toEqual<Verdict>({ verdict: "SAFE", reason: "user asked for this dir" })
+  })
+
+  it("returns null when the response is malformed (fail-closed)", async () => {
+    const { client } = mockClient({
+      prompt: async () => ({
+        data: { info: {}, parts: [{ type: "text", text: "I cannot decide." }] },
+      }),
+    })
+    const result = await classifySubject({ ...subjectBaseArgs, client })
+    expect(result).toBeNull()
   })
 })

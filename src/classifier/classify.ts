@@ -1,5 +1,8 @@
 import type { createOpencodeClient, Part } from "@opencode-ai/sdk"
-import { CLASSIFIER_SYSTEM_PROMPT, buildClassifierUserPrompt } from "./prompt.ts"
+import {
+  CLASSIFIER_SYSTEM_PROMPT,
+  buildClassifierUserPrompt,
+} from "./prompt.ts"
 import { parseVerdict, type Verdict } from "./parse.ts"
 import type { ModelRef } from "./model.ts"
 
@@ -12,14 +15,18 @@ type OpencodeClient = ReturnType<typeof createOpencodeClient>
 const CLASSIFIER_SESSION_TITLE = "[delegated-access classifier]"
 
 /**
- * Run the safety classifier for a single bash command and return a verdict.
+ * Run the safety classifier for a permission subject (a bash command, a
+ * directory path, or any future permission type) and return a verdict.
+ *
+ * Callers supply the LLM system prompt and a user-prompt builder so this
+ * function remains agnostic about what is being classified.
  *
  * Flow:
  *   1. Create an ephemeral child session (hidden from top-level lists via
  *      `parentID: <caller's sessionID>`).
- *   2. Call `session.prompt` with the classifier model, the classifier
- *      system prompt, `tools: {}` (no tools), and the user prompt containing
- *      the command + recent user messages.
+ *   2. Call `session.prompt` with the classifier model, the caller-supplied
+ *      system prompt, `tools: { "*": false }` (deny all tools), and the user
+ *      prompt built from the subject + recent user messages.
  *   3. Parse the response's text parts with {@link parseVerdict}.
  *   4. Always delete the ephemeral session in a `finally` block (errors
  *      swallowed — cleanup is best-effort).
@@ -28,19 +35,32 @@ const CLASSIFIER_SESSION_TITLE = "[delegated-access classifier]"
  * or timeout exceeding `timeoutMs`. Callers should treat `null` as "classifier
  * failure → fall back to the normal opencode approval prompt".
  */
-export async function classifyCommand(args: {
+export async function classifySubject(args: {
   client: OpencodeClient
-  command: string
+  /** The string being classified (command, path pattern, etc.). */
+  subject: string
+  /** Recent human-authored messages to give the classifier context. */
   userMessages: string[]
   parentSessionID: string
   model: ModelRef
   timeoutMs: number
+  /** LLM system prompt for this permission type. */
+  systemPrompt: string
+  /**
+   * Builds the user-turn prompt from `subject` + `userMessages`.
+   * Called exactly once per invocation with the same `subject`/`userMessages`
+   * passed to this function.
+   */
+  buildUserPrompt: (args: {
+    subject: string
+    userMessages: string[]
+  }) => string
   /**
    * Called with the ephemeral classifier session's ID as soon as it's
    * created. Callers can track these IDs to filter out downstream
    * `permission.asked` events the classifier session itself might generate
-   * (defense-in-depth — the classifier uses `tools: {}` so in practice it
-   * can't request any permissions).
+   * (defense-in-depth — the classifier uses `tools: { "*": false }` so in
+   * practice it can't request any permissions).
    */
   onEphemeralSessionCreated?: (id: string) => void
   /**
@@ -52,11 +72,13 @@ export async function classifyCommand(args: {
 }): Promise<Verdict | null> {
   const {
     client,
-    command,
+    subject,
     userMessages,
     parentSessionID,
     model,
     timeoutMs,
+    systemPrompt,
+    buildUserPrompt,
     onEphemeralSessionCreated,
     onEphemeralSessionDeleted,
   } = args
@@ -80,13 +102,13 @@ export async function classifyCommand(args: {
   let timedOut = false
   try {
     // Step 2: classifier prompt with timeout.
-    const userPrompt = buildClassifierUserPrompt({ command, userMessages })
+    const userPrompt = buildUserPrompt({ subject, userMessages })
 
     const promptCall = client.session.prompt({
       path: { id: ephemeralID },
       body: {
         model,
-        system: CLASSIFIER_SYSTEM_PROMPT,
+        system: systemPrompt,
         // Deny ALL tools for this prompt. In opencode 1.4.x, `tools: {}` is
         // interpreted as "no overrides" and the ephemeral session still
         // receives the full tool registry — which the classifier has been
@@ -147,6 +169,27 @@ export async function classifyCommand(args: {
     }
     onEphemeralSessionDeleted?.(ephemeralID)
   }
+}
+
+/**
+ * Convenience wrapper around {@link classifySubject} that supplies the
+ * bash-specific system prompt and user-prompt builder. Preserved so
+ * existing call-sites in handler.ts need no changes.
+ */
+export function classifyCommand(
+  args: Omit<
+    Parameters<typeof classifySubject>[0],
+    "subject" | "systemPrompt" | "buildUserPrompt"
+  > & { command: string },
+): ReturnType<typeof classifySubject> {
+  const { command, ...rest } = args
+  return classifySubject({
+    ...rest,
+    subject: command,
+    systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
+    buildUserPrompt: ({ subject, userMessages }) =>
+      buildClassifierUserPrompt({ command: subject, userMessages }),
+  })
 }
 
 /** Grace period between aborting a timed-out prompt and deleting the session. */
