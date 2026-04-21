@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 
 vi.mock("../classifier/classify.ts", () => ({
   classifyCommand: vi.fn(),
+  classifySubject: vi.fn(),
 }))
 // Only `getSessionMessages` is mocked (it's the only I/O call the handler
 // performs against the messages module). The pure extractors
@@ -27,15 +28,17 @@ vi.mock("./risky-path.ts", () => ({
   runRiskyPathInBackground: vi.fn(),
 }))
 
-import { classifyCommand } from "../classifier/classify.ts"
+import { classifyCommand, classifySubject } from "../classifier/classify.ts"
 import { getSessionMessages, type MessageEntry } from "../ui/messages.ts"
 import { resolveRootSessionID } from "../ui/session-tree.ts"
 import { runSafePath } from "./safe-path.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
 import { handlePermissionEvent } from "./handler.ts"
+import { DirectoryVerdictCache } from "./directory-cache.ts"
 import { DEFAULT_CONFIG } from "../config.ts"
 
 const mockedClassify = vi.mocked(classifyCommand)
+const mockedClassifySubject = vi.mocked(classifySubject)
 const mockedGetSessionMessages = vi.mocked(getSessionMessages)
 const mockedResolveRoot = vi.mocked(resolveRootSessionID)
 const mockedSafe = vi.mocked(runSafePath)
@@ -118,6 +121,7 @@ function buildCtx(overrides: Partial<{
         ? overrides.sessionModel
         : { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
     ephemeralSessionIDs: new Set<string>(),
+    directoryVerdictCache: new DirectoryVerdictCache(),
     log,
   }
   return { ctx, respondCall, log }
@@ -125,6 +129,7 @@ function buildCtx(overrides: Partial<{
 
 beforeEach(() => {
   mockedClassify.mockReset()
+  mockedClassifySubject.mockReset()
   mockedGetSessionMessages.mockReset()
   mockedResolveRoot.mockReset()
   mockedSafe.mockReset()
@@ -792,5 +797,151 @@ describe("handlePermissionEvent", () => {
       "real-human-1",
       "real-human-2",
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// external_directory permission handling
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a synthetic external_directory permission event using the runtime
+ * shape (permission / patterns fields, not SDK-typed type / pattern).
+ */
+function dirPermission(
+  path = "/Users/jacob/Documents/GitHub/premind/*",
+  overrides: Partial<{ id: string; sessionID: string }> = {},
+) {
+  return {
+    id: overrides.id ?? "perm_dir_1",
+    sessionID: overrides.sessionID ?? "sess_root",
+    permission: "external_directory",
+    patterns: [path],
+  } as never
+}
+
+describe("handlePermissionEvent (external_directory)", () => {
+  beforeEach(() => {
+    // Default: root session resolves to itself, one user message.
+    mockedResolveRoot.mockResolvedValue("sess_root")
+    mockedGetSessionMessages.mockResolvedValue([
+      userEntry("please review the premind project"),
+    ])
+    // Default: classifySubject returns SAFE.
+    mockedClassifySubject.mockResolvedValue({
+      verdict: "SAFE",
+      reason: "user asked for premind",
+    })
+    mockedSafe.mockResolvedValue("allow")
+  })
+
+  it("calls classifySubject (not classifyCommand) for external_directory", async () => {
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(dirPermission(), ctx)
+    expect(mockedClassifySubject).toHaveBeenCalledTimes(1)
+    expect(mockedClassify).not.toHaveBeenCalled()
+  })
+
+  it("passes the directory path as subject to classifySubject", async () => {
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(
+      dirPermission("/Users/jacob/Documents/GitHub/premind/*"),
+      ctx,
+    )
+    const args = mockedClassifySubject.mock.calls[0]?.[0]
+    expect(args?.subject).toBe("/Users/jacob/Documents/GitHub/premind/*")
+  })
+
+  it("auto-approves when classifySubject returns SAFE and safe-path allows", async () => {
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(dirPermission(), ctx)
+    expect(mockedSafe).toHaveBeenCalledTimes(1)
+    expect(respondCall).toHaveBeenCalledTimes(1)
+  })
+
+  it("escalates via risky-path when classifySubject returns RISKY", async () => {
+    mockedClassifySubject.mockResolvedValue({
+      verdict: "RISKY",
+      reason: "sensitive path",
+    })
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(dirPermission(), ctx)
+    expect(mockedRisky).toHaveBeenCalledTimes(1)
+    expect(respondCall).not.toHaveBeenCalled()
+  })
+
+  it("does not call classifySubject on cache hit; still runs safe-path", async () => {
+    const path = "/Users/jacob/Documents/GitHub/premind/*"
+    const { ctx } = buildCtx()
+
+    // Pre-populate cache as SAFE.
+    ctx.directoryVerdictCache.set(
+      DirectoryVerdictCache.keyFor([path]),
+      { verdict: "SAFE", reason: "cached" },
+      60_000,
+    )
+
+    await handlePermissionEvent(dirPermission(path), ctx)
+
+    expect(mockedClassifySubject).not.toHaveBeenCalled()
+    expect(mockedSafe).toHaveBeenCalledTimes(1)
+  })
+
+  it("populates the cache after a fresh SAFE verdict", async () => {
+    const path = "/Users/jacob/Documents/GitHub/premind/*"
+    const { ctx } = buildCtx()
+
+    await handlePermissionEvent(dirPermission(path), ctx)
+
+    const cacheKey = DirectoryVerdictCache.keyFor([path])
+    const cached = ctx.directoryVerdictCache.get(cacheKey)
+    expect(cached).not.toBeNull()
+    expect(cached?.verdict.verdict).toBe("SAFE")
+  })
+
+  it("does not populate the cache after a RISKY verdict", async () => {
+    mockedClassifySubject.mockResolvedValue({
+      verdict: "RISKY",
+      reason: "sensitive",
+    })
+    const path = "/Users/jacob/Documents/GitHub/premind/*"
+    const { ctx } = buildCtx()
+
+    await handlePermissionEvent(dirPermission(path), ctx)
+
+    const cacheKey = DirectoryVerdictCache.keyFor([path])
+    expect(ctx.directoryVerdictCache.get(cacheKey)).toBeNull()
+  })
+
+  it("skips external_directory when externalDirectoryEnabled is false", async () => {
+    const { ctx } = buildCtx()
+    ctx.config = { ...ctx.config, externalDirectoryEnabled: false }
+
+    await handlePermissionEvent(dirPermission(), ctx)
+
+    expect(mockedClassifySubject).not.toHaveBeenCalled()
+    expect(mockedClassify).not.toHaveBeenCalled()
+    expect(mockedSafe).not.toHaveBeenCalled()
+  })
+
+  it("skips external_directory (and all others) when enabled is false", async () => {
+    const { ctx } = buildCtx({ enabled: false })
+    await handlePermissionEvent(dirPermission(), ctx)
+    expect(mockedClassifySubject).not.toHaveBeenCalled()
+  })
+
+  it("falls back to TUI prompt when classifySubject returns null", async () => {
+    mockedClassifySubject.mockResolvedValue(null)
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(dirPermission(), ctx)
+    expect(respondCall).not.toHaveBeenCalled()
+    expect(mockedSafe).not.toHaveBeenCalled()
+  })
+
+  it("leaves TUI prompt when user cancels the safe-path countdown", async () => {
+    mockedSafe.mockResolvedValue("ask")
+    const { ctx, respondCall } = buildCtx()
+    await handlePermissionEvent(dirPermission(), ctx)
+    expect(respondCall).not.toHaveBeenCalled()
   })
 })

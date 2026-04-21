@@ -6,9 +6,17 @@ import {
   extractRootAgent,
   getSessionMessages,
 } from "../ui/messages.ts"
-import { classifyCommand } from "../classifier/classify.ts"
+import {
+  classifyCommand,
+  classifySubject,
+} from "../classifier/classify.ts"
 import { resolveClassifierModel, type ModelRef } from "../classifier/model.ts"
 import { resolveRootSessionID } from "../ui/session-tree.ts"
+import {
+  DIRECTORY_CLASSIFIER_SYSTEM_PROMPT,
+  buildDirectoryClassifierUserPrompt,
+} from "../classifier/prompt.ts"
+import { DirectoryVerdictCache } from "./directory-cache.ts"
 import { runSafePath } from "./safe-path.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
 import type { Logger } from "../log.ts"
@@ -16,13 +24,16 @@ import type { Logger } from "../log.ts"
 type OpencodeClient = ReturnType<typeof createOpencodeClient>
 
 /**
- * Permission types that our plugin classifies. For v1, bash only.
+ * Permission types that our plugin classifies for bash commands.
  *
  * OpenCode's `Permission.type` is `string` (no enum in the SDK), so we match
  * defensively. Different tool names observed in practice are listed below;
  * additional synonyms can be added if opencode versions diverge.
  */
 const BASH_TYPE_MATCHES = new Set(["bash", "command"])
+
+/** Runtime permission type string for external-directory access. */
+const EXTERNAL_DIRECTORY_TYPE = "external_directory"
 
 export type HandlerContext = {
   client: OpencodeClient
@@ -37,9 +48,16 @@ export type HandlerContext = {
    * Track IDs of ephemeral classifier sessions we create. Used by the plugin
    * entry as a loop-guard: if a `permission.asked` event's sessionID is in
    * this set, the plugin skips it (defense-in-depth — the classifier uses
-   * `tools: {}` and shouldn't generate permissions, but we guard anyway).
+   * `tools: { "*": false }` and shouldn't generate permissions, but we guard
+   * anyway).
    */
   ephemeralSessionIDs: Set<string>
+  /**
+   * Shared TTL cache for recent SAFE external_directory verdicts. A single
+   * instance is held for the plugin's lifetime and shared across all
+   * permission events so burst requests for the same path skip the LLM call.
+   */
+  directoryVerdictCache: DirectoryVerdictCache
   /** Logger for diagnostic output. */
   log: Logger
 }
@@ -109,35 +127,130 @@ export async function handlePermissionEvent(
     return
   }
 
-  // Non-bash → outside v1 scope.
-  if (!toolType || !BASH_TYPE_MATCHES.has(toolType)) {
-    log.info("skip: not a bash permission", base)
-    return
-  }
-
-  // Extract the command. `patterns` / `pattern` can be string or array.
-  const command = extractCommand(patterns)
-  if (command === null) {
-    log.info("skip: no command in pattern", {
-      ...base,
-      pattern: patterns as unknown,
+  // Dispatch by permission type.
+  if (toolType && BASH_TYPE_MATCHES.has(toolType)) {
+    const command = extractCommand(patterns)
+    if (command === null) {
+      log.info("skip: no command in pattern", {
+        ...base,
+        pattern: patterns as unknown,
+      })
+      return
+    }
+    await handleSubjectPermission({
+      subject: command,
+      subjectLabel: "command",
+      systemPrompt: null, // signals: use classifyCommand (bash-specific)
+      permission,
+      ctx,
+      output,
+      base,
     })
     return
   }
 
-  // Resolve the ROOT session.
+  if (toolType === EXTERNAL_DIRECTORY_TYPE) {
+    if (!ctx.config.externalDirectoryEnabled) {
+      log.info("skip: external_directory auto-approval disabled", base)
+      return
+    }
+    const path = extractCommand(patterns) // same extraction logic — first pattern
+    if (path === null) {
+      log.info("skip: no path in external_directory pattern", {
+        ...base,
+        pattern: patterns as unknown,
+      })
+      return
+    }
+    const patternsList = Array.isArray(patterns)
+      ? (patterns as string[]).filter(Boolean)
+      : typeof patterns === "string" && patterns
+        ? [patterns]
+        : []
+    await handleSubjectPermission({
+      subject: path,
+      subjectLabel: "path",
+      systemPrompt: DIRECTORY_CLASSIFIER_SYSTEM_PROMPT,
+      permission,
+      ctx,
+      output,
+      base,
+      directoryPatterns: patternsList,
+    })
+    return
+  }
+
+  log.info("skip: unsupported permission type", base)
+}
+
+// ---------------------------------------------------------------------------
+// Shared core: classify a subject, run safe/risky path, respond to permission
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared classification + response flow for any permission subject (bash
+ * command or directory path). The two permission types differ only in:
+ *   - `subject` string (the thing being classified)
+ *   - `systemPrompt` (null → use the bash-specific `classifyCommand` wrapper;
+ *     non-null → use the generic `classifySubject` with the given prompt)
+ *   - `directoryPatterns` (only set for directory permissions — used for the
+ *     burst-deduplication cache lookup)
+ */
+async function handleSubjectPermission(args: {
+  subject: string
+  subjectLabel: string
+  systemPrompt: string | null
+  permission: Permission
+  ctx: HandlerContext
+  output: HandlerOutput | undefined
+  base: Record<string, unknown>
+  directoryPatterns?: string[]
+}): Promise<void> {
+  const {
+    subject,
+    subjectLabel,
+    systemPrompt,
+    permission,
+    ctx,
+    output,
+    base,
+    directoryPatterns,
+  } = args
+  const { log } = ctx
+
+  // ---- Directory cache lookup (directories only) -------------------------
+  if (directoryPatterns) {
+    const cacheKey = DirectoryVerdictCache.keyFor(directoryPatterns)
+    const cached = ctx.directoryVerdictCache.get(cacheKey)
+    if (cached) {
+      log.info("directory cache hit — skipping classifier", {
+        ...base,
+        [subjectLabel]: subject,
+        cachedVerdict: cached.verdict.verdict,
+        cachedReason: cached.verdict.reason,
+      })
+      // Run safe-path with the cached verdict (burst requests still get the
+      // countdown; user can cancel any of them).
+      await runSafeOrRiskyPath({
+        verdict: cached.verdict,
+        subject,
+        subjectLabel,
+        permission,
+        ctx,
+        output,
+        base,
+      })
+      return
+    }
+  }
+
+  // ---- Root-session resolution -------------------------------------------
   //
-  // When a bash permission fires inside a subagent session, the
-  // permission's sessionID points at the subagent — whose "user" role
-  // messages are actually the dispatching agent's prompts to the
-  // subagent, NOT the real human's messages. Classifying against those
-  // would violate the plugin's core safety property ("classifier never
-  // sees the agent's messages"), so we walk up the parentID chain to
-  // find the root session and pull human messages from there.
+  // When a permission fires inside a subagent session, the sessionID points
+  // at the subagent — whose "user" messages are the dispatching agent's
+  // prompts, NOT the real human's. Walk up the parentID chain to the root.
   //
-  // Fail-closed: if the resolver returns null (SDK error, cycle, max
-  // depth exceeded, missing payload) we abort classification and leave
-  // the TUI prompt alone. The user approves manually.
+  // Fail-closed: null → TUI prompt remains, user decides manually.
   const rootSessionID = await resolveRootSessionID(
     ctx.client,
     permission.sessionID,
@@ -157,11 +270,7 @@ export async function handlePermissionEvent(
     })
   }
 
-  // Fetch the ROOT session's messages once: the classifier context needs
-  // the last K user messages, and we derive a session-model fallback from
-  // the most recent assistant message (used when the `config` hook hasn't
-  // run or didn't surface a model). Inside a subagent the root's messages
-  // are the ones authored by the real human.
+  // ---- Message extraction ------------------------------------------------
   let entries
   try {
     entries = await getSessionMessages(ctx.client, rootSessionID)
@@ -173,18 +282,12 @@ export async function handlePermissionEvent(
     return
   }
 
-  // Defense-in-depth: anchor user-message extraction to the root
-  // session's primary agent. If the root has no identifiable primary
-  // agent (e.g. empty session, or first user message missing its agent
-  // field), the filter is skipped and extraction falls back to its
-  // plain behaviour — the root-walk itself is still the primary
-  // protection against subagent confusion.
   const rootAgent = extractRootAgent(entries)
   if (rootAgent === null && entries.length > 0) {
-    log.warn("could not identify root session's primary agent; filter skipped", {
-      ...base,
-      rootSessionID,
-    })
+    log.warn(
+      "could not identify root session's primary agent; filter skipped",
+      { ...base, rootSessionID },
+    )
   }
 
   const userMessages = extractLastUserMessages(
@@ -194,8 +297,7 @@ export async function handlePermissionEvent(
   )
   const fallbackModel = extractLatestAssistantModel(entries)
 
-  // Resolve classifier model (config override → provider default → session
-  // model → assistant-message fallback → null).
+  // ---- Classifier model --------------------------------------------------
   const model = resolveClassifierModel({
     configOverride: ctx.config.classifierModel,
     sessionModel: ctx.sessionModel ?? fallbackModel ?? undefined,
@@ -220,29 +322,39 @@ export async function handlePermissionEvent(
 
   log.info("classifying", {
     ...base,
-    command,
+    [subjectLabel]: subject,
     classifierModel: `${model.providerID}/${model.modelID}`,
     modelSource,
   })
 
-  // Run the classifier. Track the ephemeral session ID in the loop-guard
-  // set so that if the classifier somehow generates its own permission
-  // events (it shouldn't, since tools are disabled), the plugin entry can
-  // skip them.
-  const verdict = await classifyCommand({
+  // ---- Classifier call ---------------------------------------------------
+  const commonClassifyArgs = {
     client: ctx.client,
-    command,
     userMessages,
     parentSessionID: permission.sessionID,
     model,
     timeoutMs: ctx.config.classifierTimeoutMs,
-    onEphemeralSessionCreated: (id) => ctx.ephemeralSessionIDs.add(id),
-    onEphemeralSessionDeleted: (id) => ctx.ephemeralSessionIDs.delete(id),
-  })
+    onEphemeralSessionCreated: (id: string) =>
+      ctx.ephemeralSessionIDs.add(id),
+    onEphemeralSessionDeleted: (id: string) =>
+      ctx.ephemeralSessionIDs.delete(id),
+  }
+
+  const verdict =
+    systemPrompt === null
+      ? // Bash path: use the convenience wrapper that supplies the bash prompt.
+        await classifyCommand({ ...commonClassifyArgs, command: subject })
+      : // Generic path (e.g. directory): caller supplies the system prompt.
+        await classifySubject({
+          ...commonClassifyArgs,
+          subject,
+          systemPrompt,
+          buildUserPrompt: buildDirectoryClassifierUserPrompt,
+        })
 
   if (!verdict) {
     log.warn("classifier failed; leaving TUI prompt alone", base)
-    return // fail closed: TUI prompt remains, user decides
+    return
   }
 
   log.info("classifier verdict", {
@@ -251,13 +363,51 @@ export async function handlePermissionEvent(
     reason: verdict.reason,
   })
 
+  // ---- Directory cache population (SAFE only) ----------------------------
+  if (directoryPatterns && verdict.verdict === "SAFE") {
+    const cacheKey = DirectoryVerdictCache.keyFor(directoryPatterns)
+    ctx.directoryVerdictCache.set(
+      cacheKey,
+      verdict,
+      ctx.config.directoryVerdictCacheTtlMs,
+    )
+  }
+
+  // ---- Safe / Risky path -------------------------------------------------
+  await runSafeOrRiskyPath({
+    verdict,
+    subject,
+    subjectLabel,
+    permission,
+    ctx,
+    output,
+    base,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Safe / risky path execution (shared between cache-hit and fresh-verdict paths)
+// ---------------------------------------------------------------------------
+
+async function runSafeOrRiskyPath(args: {
+  verdict: import("../classifier/parse.ts").Verdict
+  subject: string
+  subjectLabel: string
+  permission: Permission
+  ctx: HandlerContext
+  output: HandlerOutput | undefined
+  base: Record<string, unknown>
+}): Promise<void> {
+  const { verdict, subject, subjectLabel, permission, ctx, output, base } = args
+  const { log } = ctx
+
   if (verdict.verdict === "SAFE") {
     log.info("entering safe-path", {
       ...base,
       countdownMs: ctx.config.safeCountdownMs,
     })
     const decision = await runSafePath({
-      command,
+      command: subject,
       reason: verdict.reason,
       countdownMs: ctx.config.safeCountdownMs,
       sound: ctx.config.notificationSound,
@@ -265,9 +415,11 @@ export async function handlePermissionEvent(
     })
     log.info("safe-path returned", { ...base, decision })
     if (decision === "allow") {
-      log.info("auto-approving", { ...base, command, viaOutput: Boolean(output) })
-      // Prefer pre-ask output mutation when the hook supports it (avoids
-      // the TUI flash); otherwise fall back to the SDK respond endpoint.
+      log.info("auto-approving", {
+        ...base,
+        [subjectLabel]: subject,
+        viaOutput: Boolean(output),
+      })
       if (output) {
         output.status = "allow"
       } else {
@@ -280,18 +432,12 @@ export async function handlePermissionEvent(
   }
 
   log.info("risky — escalating via TUI + notification", base)
-  // RISKY: kick off the notification with Approve/Reject buttons. The
-  // notification resolves via the SDK on button click; if the user
-  // answers in the TUI first, the notification is a no-op.
-  //
-  // For the pre-ask (permission.ask) hook path, we explicitly leave
-  // output.status as-is ("ask") so opencode proceeds to show the normal
-  // TUI prompt — the notification runs alongside it.
+  // RISKY: fire the notification alongside opencode's TUI prompt.
   void runRiskyPathInBackground({
     client: ctx.client,
     sessionID: permission.sessionID,
     permissionID: permission.id,
-    command,
+    command: subject,
     reason: verdict.reason,
     sound: ctx.config.notificationSound,
     timeoutSec: 60,

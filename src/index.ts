@@ -6,6 +6,7 @@ import {
   type HandlerContext,
   type HandlerOutput,
 } from "./permission/handler.ts"
+import { DirectoryVerdictCache } from "./permission/directory-cache.ts"
 import type { ModelRef } from "./classifier/model.ts"
 import { createLogger, type Logger } from "./log.ts"
 
@@ -54,8 +55,13 @@ const DelegatedAccess: Plugin = async ({ client }) => {
   // Track IDs of ephemeral classifier sessions we create. All permission
   // hooks skip events whose `sessionID` is in this set, so the classifier
   // can't trigger itself (defense-in-depth — the classifier runs with
-  // `tools: {}` and shouldn't request permissions).
+  // `tools: { "*": false }` and shouldn't request permissions).
   const ephemeralSessionIDs = new Set<string>()
+
+  // Shared TTL cache for recent SAFE external_directory verdicts. Held at
+  // plugin lifetime (not per-session) so burst deduplication works across
+  // rapid-fire permission events on the same session.
+  const directoryVerdictCache = new DirectoryVerdictCache()
 
   // Permissions we've already handled, shared across all three hooks so
   // each permissionID is classified once no matter which hook(s) fire.
@@ -79,7 +85,14 @@ const DelegatedAccess: Plugin = async ({ client }) => {
   }
 
   function buildCtx(): HandlerContext {
-    return { client, config, sessionModel, ephemeralSessionIDs, log }
+    return {
+      client,
+      config,
+      sessionModel,
+      ephemeralSessionIDs,
+      directoryVerdictCache,
+      log,
+    }
   }
 
   /**
@@ -178,6 +191,8 @@ const DelegatedAccess: Plugin = async ({ client }) => {
         safeCountdownMs: config.safeCountdownMs,
         classifierTimeoutMs: config.classifierTimeoutMs,
         classifierModel: config.classifierModel,
+        externalDirectoryEnabled: config.externalDirectoryEnabled,
+        directoryVerdictCacheTtlMs: config.directoryVerdictCacheTtlMs,
         sessionModel: sessionModel
           ? `${sessionModel.providerID}/${sessionModel.modelID}`
           : null,
