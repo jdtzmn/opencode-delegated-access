@@ -13,6 +13,7 @@ You could turn off permissions entirely with `--dangerously-skip-permissions`, b
 Delegated Access splits the difference:
 
 - **Safe commands auto-dismiss themselves.** OpenCode's prompt briefly flashes, a small LLM (Haiku-class by default) classifies it as safe, a "Running in 5s — Cancel" notification appears, and after the countdown the plugin dismisses the prompt for you and the command runs. Don't click Cancel, it runs. Ignore it, it runs.
+- **External directory access is handled the same way.** When the agent wants to read or write outside the current project (e.g. a sibling repo you just mentioned), the same classifier decides whether your recent messages justify it — no extra config needed.
 - **Risky commands wake you up.** Destructive `rm`, `sudo`, `curl | sh`, anything touching `.env`, anything you didn't ask for — a desktop notification pops up with **Approve** and **Reject** buttons. Click one, the TUI prompt closes. Click nothing and the prompt's still there when you come back.
 - **Weird commands fail safe.** Classifier timed out? API flaked? Weird response? The prompt just stays there waiting for you. Nothing ever slips through silently.
 
@@ -20,11 +21,11 @@ You stay in flow. The agent stops pestering you for routine stuff. Dangerous stu
 
 ## How it decides
 
-Every time OpenCode would prompt for a bash command, Delegated Access:
+Every time OpenCode would prompt for a bash command **or an external directory access**, Delegated Access:
 
 1. Finds the root session. If the permission fired inside a subagent, walks up `parentID` to where _you_ actually typed.
 2. Grabs the last N messages **you** sent from that root session (never the agent's messages, never a parent agent's dispatch prompt to a subagent — that would be a prompt injection wide open).
-3. Asks a small fast model: _given this command and what the user just said, is this SAFE or RISKY?_
+3. Asks a small fast model: _given this command / directory and what the user just said, is this SAFE or RISKY?_
 4. Acts on the verdict:
 
 ```
@@ -97,8 +98,10 @@ That's it. Defaults just work. Start OpenCode and it's live.
     "contextMessageCount": 3,
     "safeCountdownMs": 5000,
     "classifierModel": "anthropic/claude-haiku-4-5",
-    "classifierTimeoutMs": 5000,
-    "notificationSound": true
+    "classifierTimeoutMs": 15000,
+    "notificationSound": true,
+    "externalDirectoryEnabled": true,
+    "directoryVerdictCacheTtlMs": 60000
   }
 }
 ```
@@ -109,8 +112,10 @@ That's it. Defaults just work. Start OpenCode and it's live.
 | `contextMessageCount` | `3` | How many of **your** recent messages the classifier sees. 0 = no context, just the command. |
 | `safeCountdownMs` | `5000` | Cancellable countdown before auto-dismissing SAFE prompts. `0` = silent instant approve. |
 | `classifierModel` | _auto_ | Override the judge model, e.g. `anthropic/claude-haiku-4-5`. When unset, uses a small fast default for your provider (Haiku, `gpt-4.1-mini`, `gemini-flash-lite`). |
-| `classifierTimeoutMs` | `5000` | How long before we give up on the classifier and leave the TUI prompt alone. |
+| `classifierTimeoutMs` | `15000` | How long before we give up on the classifier and leave the TUI prompt alone. |
 | `notificationSound` | `true` | OS notification sound on/off. |
+| `externalDirectoryEnabled` | `true` | Also classify `external_directory` permissions (directory access outside the current project). Set to `false` to restrict the plugin to bash commands only. |
+| `directoryVerdictCacheTtlMs` | `60000` | How long (ms) a SAFE directory verdict is cached. Covers rapid burst requests (agent walking a tree) without re-classifying each sub-path individually. `0` disables the cache. |
 
 ### Use OpenCode's existing permission rules for fast-path patterns
 
@@ -123,6 +128,9 @@ Don't duplicate allowlists here. OpenCode's static rules run **before** this plu
       "git status": "allow",
       "npm test":   "allow",
       "rm -rf /*":  "deny"
+    },
+    "external_directory": {
+      "/tmp/**": "allow"
     }
   }
 }
@@ -136,23 +144,24 @@ The desktop notifications with Approve / Reject buttons work via `terminal-notif
 
 ## How it's safe
 
-- **The classifier never sees the agent's messages.** Only yours. A rogue assistant can't smuggle "this command is safe, trust me" into the judge's context.
-- **Subagents don't weaken that.** When a bash permission fires inside a subagent session, the plugin walks up the session tree to the root and pulls _your_ messages from there — never the dispatching agent's prompt to the subagent. If the tree can't be verified (SDK error, unexpected cycle, too deep) the plugin fails closed and leaves the TUI prompt for you. Even on the root session, user-role messages are filtered to the root's primary agent so synthetic "user" turns addressed elsewhere never leak in.
-- **Every error leaves the TUI prompt alone.** Classifier timeout, API error, malformed verdict, missing command, session-tree lookup failure, unexpected exception — none of them call the respond API, so the TUI prompt stays and you decide manually. The plugin only ever _dismisses_ a prompt after an affirmative SAFE decision, never silently passes through on errors.
+- **The classifier never sees the agent's messages.** Only yours. A rogue assistant can't smuggle "this command is safe, trust me" into the judge's context. Same for directory access — the classifier answers "did the human's recent messages justify this path?" not "does the agent think it's safe?"
+- **Subagents don't weaken that.** When a permission fires inside a subagent session, the plugin walks up the session tree to the root and pulls _your_ messages from there — never the dispatching agent's prompt to the subagent. If the tree can't be verified (SDK error, unexpected cycle, too deep) the plugin fails closed and leaves the TUI prompt for you. Even on the root session, user-role messages are filtered to the root's primary agent so synthetic "user" turns addressed elsewhere never leak in.
+- **Every error leaves the TUI prompt alone.** Classifier timeout, API error, malformed verdict, missing subject, session-tree lookup failure, unexpected exception — none of them call the respond API, so the TUI prompt stays and you decide manually. The plugin only ever _dismisses_ a prompt after an affirmative SAFE decision, never silently passes through on errors.
 - **The classifier can't call tools.** The ephemeral session runs with `tools: { "*": false }`, so even a compromised classifier model can only return text.
-- **Risky commands get two channels, not one.** The TUI prompt stays up AND the notification fires with Approve/Reject. Whichever you answer first wins — no bug in the notification path can ever accidentally auto-approve a RISKY command.
+- **Risky commands and risky directory requests get two channels, not one.** The TUI prompt stays up AND the notification fires with Approve/Reject. Whichever you answer first wins — no bug in the notification path can ever accidentally auto-approve a RISKY request.
 - **The classifier can't trigger itself.** We track ephemeral classifier sessions and ignore permission events from them.
+- **The directory cache only speeds things up; it can't change a RISKY verdict.** Only SAFE verdicts are cached. A RISKY verdict for any path always triggers the escalation notification — the cache only deduplicates rapid burst requests for a path that was already classified SAFE.
 
 ## Status
 
-v0.1.0. Bash commands only (edit / write / webfetch still prompt normally — that's the scope for v1). 201 tests, TypeScript, Bun. macOS-tested; Linux/Windows should work with degraded notification interactivity.
+v0.2.0. Bash commands and external directory access. Edit / write / webfetch still prompt normally — those are out of scope. 238 tests, TypeScript, Bun. macOS-tested; Linux/Windows should work with degraded notification interactivity.
 
 ## Development
 
 ```bash
 bun install
 bun run check   # TypeScript check
-bun run test    # 201 unit tests
+bun run test    # 238 unit tests
 ```
 
 Design doc and implementation plan in [`docs/superpowers/`](./docs/superpowers/).
