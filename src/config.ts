@@ -36,6 +36,26 @@ export const ConfigSchema = z.object({
 
   /** Whether OS notifications play a sound. */
   notificationSound: z.boolean().default(true),
+
+  /**
+   * When true (default), the plugin also classifies `external_directory`
+   * permission requests using the directory-specific classifier prompt.
+   * Set to false to restrict the plugin to bash commands only.
+   */
+  externalDirectoryEnabled: z.boolean().default(true),
+
+  /**
+   * How long a SAFE external_directory verdict is cached before the next
+   * permission request for the same path pattern must be re-classified.
+   * A 60-second window covers typical burst requests (agent globbing a tree)
+   * without letting stale verdicts outlive a conversational context shift.
+   */
+  directoryVerdictCacheTtlMs: z
+    .number()
+    .int()
+    .min(0)
+    .max(300_000)
+    .default(60_000),
 })
 
 export type DelegatedAccessConfig = z.infer<typeof ConfigSchema>

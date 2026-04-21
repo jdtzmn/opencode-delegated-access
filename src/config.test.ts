@@ -20,6 +20,8 @@ describe("ConfigSchema", () => {
       classifierModel: "anthropic/claude-haiku-4-5",
       classifierTimeoutMs: 8000,
       notificationSound: false,
+      externalDirectoryEnabled: false,
+      directoryVerdictCacheTtlMs: 30_000,
     }
     expect(ConfigSchema.parse(input)).toEqual(input)
   })
@@ -64,6 +66,20 @@ describe("ConfigSchema", () => {
       safeCountdownMs: 5000,
       classifierTimeoutMs: 15_000,
       notificationSound: true,
+      externalDirectoryEnabled: true,
+      directoryVerdictCacheTtlMs: 60_000,
     })
+  })
+
+  it("rejects directoryVerdictCacheTtlMs above the maximum", () => {
+    expect(() =>
+      ConfigSchema.parse({ directoryVerdictCacheTtlMs: 300_001 }),
+    ).toThrow()
+  })
+
+  it("rejects negative directoryVerdictCacheTtlMs", () => {
+    expect(() =>
+      ConfigSchema.parse({ directoryVerdictCacheTtlMs: -1 }),
+    ).toThrow()
   })
 })
