@@ -99,6 +99,7 @@ Each file has one responsibility and can be understood in isolation.
 | `src/classifier/classify.ts` | Orchestrate: create session → prompt → delete session → parse. With timeout. |
 | `src/ui/messages.ts` | Fetch last K **user** messages from a session via the SDK. Optional rootAgent filter for subagent-origin permissions. |
 | `src/ui/session-tree.ts` | Walk `Session.parentID` to find the root session (added post-initial-impl for subagent safety). |
+| `src/repo-context.ts` | Fetch branch + open PR via `git` and `gh` (best-effort). TTL'd cache (`RepoContextCache`) keyed by cwd; coalesces concurrent fetches. Added post-initial-impl for command-targeting context (e.g., `gh pr comment 123`). |
 | `src/notify/callback-server.ts` | Ephemeral localhost HTTP server: bind → wait for request → return outcome. |
 | `src/notify/notify.ts` | `node-notifier` wrapper that sends notifications with action URLs. |
 | `src/permission/safe-path.ts` | SAFE path: notification with countdown + cancel, race timer vs HTTP. |

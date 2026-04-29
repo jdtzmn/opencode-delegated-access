@@ -329,6 +329,37 @@ describe("classifyCommand", () => {
     expect(result?.verdict).toBe("SAFE")
   })
 
+  it("includes <repo_context> in the prompt when repoContext is supplied", async () => {
+    const { client, calls } = mockClient({})
+    await classifyCommand({
+      ...baseArgs,
+      client,
+      repoContext: {
+        branch: "feat/foo",
+        openPR: { number: 42, title: "Test PR", baseBranch: "main" },
+      },
+    })
+
+    const arg = calls.prompt.mock.calls[0]?.[0]
+    const userText = (arg?.body?.parts?.[0] as { text?: string })?.text ?? ""
+    expect(userText).toContain("<repo_context>")
+    expect(userText).toContain("branch: feat/foo")
+    expect(userText).toContain("open_pr_number: 42")
+  })
+
+  it("omits <repo_context> when repoContext is null or undefined", async () => {
+    const { client, calls } = mockClient({})
+    await classifyCommand({
+      ...baseArgs,
+      client,
+      repoContext: null,
+    })
+
+    const arg = calls.prompt.mock.calls[0]?.[0]
+    const userText = (arg?.body?.parts?.[0] as { text?: string })?.text ?? ""
+    expect(userText).not.toContain("<repo_context>")
+  })
+
   it("invokes onEphemeralSessionCreated and onEphemeralSessionDeleted around the classifier call", async () => {
     const { client } = mockClient({})
     const created = vi.fn()

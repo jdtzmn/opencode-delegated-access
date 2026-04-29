@@ -25,8 +25,9 @@ Every time OpenCode would prompt for a bash command **or an external directory a
 
 1. Finds the root session. If the permission fired inside a subagent, walks up `parentID` to where _you_ actually typed.
 2. Grabs the last N messages **you** sent from that root session (never the agent's messages, never a parent agent's dispatch prompt to a subagent — that would be a prompt injection wide open).
-3. Asks a small fast model: _given this command / directory and what the user just said, is this SAFE or RISKY?_
-4. Acts on the verdict:
+3. Sniffs the current git state — branch name, and (via `gh`) the PR number/title linked to that branch if there's an open PR. Helps the classifier judge commands that target specific PRs (e.g. `gh pr comment 123`).
+4. Asks a small fast model: _given this command / directory, what the user just said, and the current branch + PR, is this SAFE or RISKY?_
+5. Acts on the verdict:
 
 ```
     ┌───────────────────────────────┐
@@ -151,17 +152,18 @@ The desktop notifications with Approve / Reject buttons work via `terminal-notif
 - **Risky commands and risky directory requests get two channels, not one.** The TUI prompt stays up AND the notification fires with Approve/Reject. Whichever you answer first wins — no bug in the notification path can ever accidentally auto-approve a RISKY request.
 - **The classifier can't trigger itself.** We track ephemeral classifier sessions and ignore permission events from them.
 - **The directory cache only speeds things up; it can't change a RISKY verdict.** Only SAFE verdicts are cached. A RISKY verdict for any path always triggers the escalation notification — the cache only deduplicates rapid burst requests for a path that was already classified SAFE.
+- **Repo context is best-effort and gracefully optional.** Branch is read with `git`; the open-PR lookup uses `gh`. If `gh` isn't installed, isn't authenticated, or the working directory isn't a git repo, the classifier just runs without that context — never blocks. The PR title is rendered inside `<repo_context>` delimiters and treated as data (not instructions) by the classifier.
 
 ## Status
 
-v0.2.0. Bash commands and external directory access. Edit / write / webfetch still prompt normally — those are out of scope. 238 tests, TypeScript, Bun. macOS-tested; Linux/Windows should work with degraded notification interactivity.
+v0.2.0. Bash commands and external directory access. Edit / write / webfetch still prompt normally — those are out of scope. TypeScript, Bun. macOS-tested; Linux/Windows should work with degraded notification interactivity.
 
 ## Development
 
 ```bash
 bun install
 bun run check   # TypeScript check
-bun run test    # 238 unit tests
+bun run test    # full unit-test suite
 ```
 
 Design doc and implementation plan in [`docs/superpowers/`](./docs/superpowers/).

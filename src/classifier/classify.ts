@@ -5,6 +5,7 @@ import {
 } from "./prompt.ts"
 import { parseVerdict, type Verdict } from "./parse.ts"
 import type { ModelRef } from "./model.ts"
+import type { RepoContext } from "../repo-context.ts"
 
 type OpencodeClient = ReturnType<typeof createOpencodeClient>
 
@@ -54,7 +55,15 @@ export async function classifySubject(args: {
   buildUserPrompt: (args: {
     subject: string
     userMessages: string[]
+    repoContext?: RepoContext | null
   }) => string
+  /**
+   * Optional repo context (branch + open PR) handed to the classifier as
+   * additional decision-shaping signal. `null` means "unavailable" (not
+   * a git repo, gh missing, etc.) and is rendered as no <repo_context>
+   * block in the prompt.
+   */
+  repoContext?: RepoContext | null
   /**
    * Called with the ephemeral classifier session's ID as soon as it's
    * created. Callers can track these IDs to filter out downstream
@@ -79,6 +88,7 @@ export async function classifySubject(args: {
     timeoutMs,
     systemPrompt,
     buildUserPrompt,
+    repoContext,
     onEphemeralSessionCreated,
     onEphemeralSessionDeleted,
   } = args
@@ -102,7 +112,11 @@ export async function classifySubject(args: {
   let timedOut = false
   try {
     // Step 2: classifier prompt with timeout.
-    const userPrompt = buildUserPrompt({ subject, userMessages })
+    const userPrompt = buildUserPrompt({
+      subject,
+      userMessages,
+      repoContext: repoContext ?? null,
+    })
 
     const promptCall = client.session.prompt({
       path: { id: ephemeralID },
@@ -187,8 +201,12 @@ export function classifyCommand(
     ...rest,
     subject: command,
     systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-    buildUserPrompt: ({ subject, userMessages }) =>
-      buildClassifierUserPrompt({ command: subject, userMessages }),
+    buildUserPrompt: ({ subject, userMessages, repoContext }) =>
+      buildClassifierUserPrompt({
+        command: subject,
+        userMessages,
+        repoContext: repoContext ?? null,
+      }),
   })
 }
 

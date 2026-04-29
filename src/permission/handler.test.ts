@@ -93,6 +93,7 @@ function buildCtx(overrides: Partial<{
   classifierModel: string
   sessionModel: { providerID: string; modelID: string } | undefined
   respondImpl: (opts: unknown) => Promise<unknown>
+  getRepoContext: () => Promise<unknown> | unknown
 }> = {}) {
   const respondCall = vi.fn(
     overrides.respondImpl ?? (async () => ({ data: true } as unknown)),
@@ -130,7 +131,14 @@ function buildCtx(overrides: Partial<{
       sound: false,
     }),
     log,
-  }
+    ...(overrides.getRepoContext !== undefined
+      ? {
+          getRepoContext: overrides.getRepoContext as () => Promise<
+            ReturnType<typeof Object> | null
+          >,
+        }
+      : {}),
+  } as unknown as Parameters<typeof handlePermissionEvent>[1]
   return { ctx, respondCall, log }
 }
 
@@ -804,6 +812,67 @@ describe("handlePermissionEvent", () => {
       "real-human-1",
       "real-human-2",
     ])
+  })
+
+  // --- repo context wiring ----------------------------------------------
+
+  it("forwards repo context from getRepoContext to classifyCommand", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const repoCtx = {
+      branch: "feat/x",
+      openPR: { number: 7, title: "Test", baseBranch: "main" },
+    }
+    const { ctx } = buildCtx({
+      getRepoContext: vi.fn(async () => repoCtx),
+    })
+
+    await handlePermissionEvent(basePermission(), ctx)
+
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(classifyArgs?.repoContext).toEqual(repoCtx)
+  })
+
+  it("forwards null repo context when fetcher returns null", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx } = buildCtx({
+      getRepoContext: vi.fn(async () => null),
+    })
+
+    await handlePermissionEvent(basePermission(), ctx)
+
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(classifyArgs?.repoContext).toBeNull()
+  })
+
+  it("forwards null repo context when getRepoContext throws", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx } = buildCtx({
+      getRepoContext: vi.fn(async () => {
+        throw new Error("boom")
+      }),
+    })
+
+    await handlePermissionEvent(basePermission(), ctx)
+
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(classifyArgs?.repoContext).toBeNull()
+  })
+
+  it("works without a getRepoContext (backward-compat with older ctx)", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx } = buildCtx() // no getRepoContext provided
+    await handlePermissionEvent(basePermission(), ctx)
+
+    const classifyArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(classifyArgs?.repoContext).toBeNull()
   })
 })
 

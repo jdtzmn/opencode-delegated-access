@@ -11,6 +11,11 @@ import { SafePathBatcher } from "./permission/safe-path-batcher.ts"
 import { sendNotification } from "./notify/notify.ts"
 import type { ModelRef } from "./classifier/model.ts"
 import { createLogger, type Logger } from "./log.ts"
+import {
+  RepoContextCache,
+  type BunShellLike,
+  type RepoContext,
+} from "./repo-context.ts"
 
 /**
  * OpenCode plugin entry point.
@@ -41,9 +46,30 @@ import { createLogger, type Logger } from "./log.ts"
  * Plugin config: opencode.json → top-level `delegatedAccess` object. Any
  * shape mismatch is ignored; defaults fill in.
  */
-const DelegatedAccess: Plugin = async ({ client }) => {
+const DelegatedAccess: Plugin = async ({ client, worktree, $ }) => {
   const log: Logger = createLogger(client)
   log.info("plugin loaded")
+
+  // Repo-context cache: branch + open PR (via gh) — fetched lazily on the
+  // first permission event after a 30s idle window. Cache is keyed by cwd
+  // (in practice always `worktree`) and shared across all permission
+  // events for the lifetime of the plugin.
+  const repoContextCache = new RepoContextCache({
+    $: $ as unknown as BunShellLike,
+  })
+
+  // Track whether we've already logged a "repo context unavailable" line
+  // so we don't spam the log on every permission event when gh is missing.
+  let loggedRepoContextUnavailable = false
+
+  async function getRepoContext(): Promise<RepoContext | null> {
+    const ctx = await repoContextCache.get(worktree)
+    if (ctx === null && !loggedRepoContextUnavailable) {
+      log.info("repo context unavailable", { worktree })
+      loggedRepoContextUnavailable = true
+    }
+    return ctx
+  }
 
   // Config is resolved lazily — we receive the full config blob via the
   // `config` hook and latch the plugin-specific subsection. Defaults take
@@ -114,6 +140,7 @@ const DelegatedAccess: Plugin = async ({ client }) => {
       directoryVerdictCache,
       safePathBatcher,
       log,
+      getRepoContext,
     }
   }
 

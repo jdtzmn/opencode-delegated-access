@@ -21,6 +21,7 @@ import { runSafePath } from "./safe-path.ts"
 import type { SafePathBatcher } from "./safe-path-batcher.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
 import type { Logger } from "../log.ts"
+import type { RepoContext } from "../repo-context.ts"
 
 type OpencodeClient = ReturnType<typeof createOpencodeClient>
 
@@ -67,6 +68,13 @@ export type HandlerContext = {
   safePathBatcher: SafePathBatcher
   /** Logger for diagnostic output. */
   log: Logger
+  /**
+   * Lazy fetcher for repo context (branch + open PR), shared across
+   * permission events. Returns `null` when the worktree isn't a git repo
+   * or fetching fails. Keep it on `ctx` so the handler stays decoupled
+   * from the cache implementation.
+   */
+  getRepoContext?: () => Promise<RepoContext | null>
 }
 
 /**
@@ -327,11 +335,26 @@ async function handleSubjectPermission(args: {
         ? "latestAssistantMessage"
         : "unknown"
 
+  // Best-effort fetch of repo context (branch + open PR). Cached upstream
+  // with a short TTL so back-to-back permissions don't all re-fetch.
+  let repoContext: RepoContext | null = null
+  if (ctx.getRepoContext) {
+    try {
+      repoContext = await ctx.getRepoContext()
+    } catch {
+      // Repo context is optional — never let a fetch failure block
+      // classification.
+      repoContext = null
+    }
+  }
+
   log.info("classifying", {
     ...base,
     [subjectLabel]: subject,
     classifierModel: `${model.providerID}/${model.modelID}`,
     modelSource,
+    repoBranch: repoContext?.branch ?? null,
+    repoOpenPR: repoContext?.openPR?.number ?? null,
   })
 
   // ---- Classifier call ---------------------------------------------------
@@ -341,6 +364,7 @@ async function handleSubjectPermission(args: {
     parentSessionID: permission.sessionID,
     model,
     timeoutMs: ctx.config.classifierTimeoutMs,
+    repoContext,
     onEphemeralSessionCreated: (id: string) =>
       ctx.ephemeralSessionIDs.add(id),
     onEphemeralSessionDeleted: (id: string) =>
