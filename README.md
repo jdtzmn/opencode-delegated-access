@@ -91,21 +91,29 @@ That's it. Defaults just work. Start OpenCode and it's live.
 
 ### 3. (Optional) Tune it
 
+Use the **per-plugin tuple form** — `[pluginSpec, optionsObject]` — to pass options to the plugin. This is the schema-blessed mechanism in OpenCode and avoids the unknown-top-level-key startup error.
+
 ```jsonc
 {
-  "plugin": ["opencode-delegated-access@git+https://github.com/jdtzmn/opencode-delegated-access.git"],
-  "delegatedAccess": {
-    "enabled": true,
-    "contextMessageCount": 3,
-    "safeCountdownMs": 5000,
-    "classifierModel": "anthropic/claude-haiku-4-5",
-    "classifierTimeoutMs": 15000,
-    "notificationSound": true,
-    "externalDirectoryEnabled": true,
-    "directoryVerdictCacheTtlMs": 60000
-  }
+  "plugin": [
+    [
+      "opencode-delegated-access@git+https://github.com/jdtzmn/opencode-delegated-access.git",
+      {
+        "enabled": true,
+        "contextMessageCount": 3,
+        "safeCountdownMs": 5000,
+        "classifierModel": "anthropic/claude-haiku-4-5",
+        "classifierTimeoutMs": 15000,
+        "notificationSound": true,
+        "externalDirectoryEnabled": true,
+        "directoryVerdictCacheTtlMs": 60000
+      }
+    ]
+  ]
 }
 ```
+
+> **Migrating from older configs:** previous versions of this README documented a top-level `delegatedAccess` object. That form is **no longer supported** — OpenCode rejects unknown top-level keys at startup. Move your settings into the tuple form shown above.
 
 | Knob | Default | What it does |
 |---|---|---|

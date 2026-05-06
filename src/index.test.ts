@@ -16,7 +16,9 @@ beforeEach(() => {
   })
 })
 
-async function makePluginHooks() {
+async function makePluginHooks(
+  options?: Record<string, unknown>,
+) {
   const pluginInput = {
     client: {} as unknown,
     project: {} as unknown,
@@ -27,7 +29,10 @@ async function makePluginHooks() {
   }
   // Our plugin registers extra hook keys ("permission.updated") that aren't
   // in the Hooks interface; cast the return type for ergonomic access.
-  return (await DelegatedAccess(pluginInput as never)) as unknown as Record<
+  return (await DelegatedAccess(
+    pluginInput as never,
+    options as never,
+  )) as unknown as Record<
     string,
     ((...args: unknown[]) => Promise<void>) | undefined
   >
@@ -184,9 +189,9 @@ describe("DelegatedAccess plugin entry — shotgun hook registration", () => {
     expect(mockedHandle).not.toHaveBeenCalled()
   })
 
-  // --- config latching --------------------------------------------------
+  // --- plugin config (tuple-form options) -------------------------------
 
-  it("uses defaults when no config is supplied", async () => {
+  it("uses defaults when no plugin options are supplied", async () => {
     const hooks = await makePluginHooks()
     await hooks["permission.updated"]!(basePermission() as never)
     const ctx = mockedHandle.mock.calls[0]?.[1]
@@ -197,28 +202,38 @@ describe("DelegatedAccess plugin entry — shotgun hook registration", () => {
     expect(typeof ctx?.log?.error).toBe("function")
   })
 
-  it("latches plugin config from the delegatedAccess key in opencode config", async () => {
-    const hooks = await makePluginHooks()
-    await hooks["config"]!({
-      delegatedAccess: { enabled: false, contextMessageCount: 5 },
-    } as never)
+  it("uses defaults when plugin options is an empty object", async () => {
+    const hooks = await makePluginHooks({})
+    await hooks["permission.updated"]!(basePermission() as never)
+    const ctx = mockedHandle.mock.calls[0]?.[1]
+    expect(ctx?.config.enabled).toBe(true)
+    expect(ctx?.config.contextMessageCount).toBe(3) // default
+  })
 
+  it("applies tuple-form plugin options at factory time", async () => {
+    const hooks = await makePluginHooks({
+      enabled: false,
+      contextMessageCount: 5,
+      safeCountdownMs: 0,
+    })
     await hooks["permission.updated"]!(basePermission() as never)
     const ctx = mockedHandle.mock.calls[0]?.[1]
     expect(ctx?.config.enabled).toBe(false)
     expect(ctx?.config.contextMessageCount).toBe(5)
+    expect(ctx?.config.safeCountdownMs).toBe(0)
   })
 
-  it("falls back to defaults when plugin config is invalid", async () => {
-    const hooks = await makePluginHooks()
-    await hooks["config"]!({
-      delegatedAccess: { enabled: "not a boolean" },
-    } as never)
-
+  it("falls back to defaults when tuple-form options are invalid", async () => {
+    const hooks = await makePluginHooks({
+      enabled: "not a boolean",
+    } as Record<string, unknown>)
     await hooks["permission.updated"]!(basePermission() as never)
     const ctx = mockedHandle.mock.calls[0]?.[1]
     expect(ctx?.config.enabled).toBe(true)
+    expect(ctx?.config.contextMessageCount).toBe(3)
   })
+
+  // --- session model (still extracted from the config hook input) -------
 
   it("parses session model from config.model", async () => {
     const hooks = await makePluginHooks()
@@ -242,6 +257,20 @@ describe("DelegatedAccess plugin entry — shotgun hook registration", () => {
       providerID: "openai",
       modelID: "gpt-4.1-mini",
     })
+  })
+
+  it("ignores any top-level `delegatedAccess` key on the config hook input", async () => {
+    // Defensive: opencode rejects unknown top-level keys at startup, so
+    // this shape would never reach a real plugin in production. But we
+    // assert the plugin's own config isn't accidentally re-resolved from
+    // the config hook either.
+    const hooks = await makePluginHooks({ enabled: true })
+    await hooks["config"]!({
+      delegatedAccess: { enabled: false },
+    } as never)
+    await hooks["permission.updated"]!(basePermission() as never)
+    const ctx = mockedHandle.mock.calls[0]?.[1]
+    expect(ctx?.config.enabled).toBe(true)
   })
 
   // --- error safety -----------------------------------------------------

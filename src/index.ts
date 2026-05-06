@@ -43,10 +43,26 @@ import {
  * This bypasses the TUI prompt-bar sink that otherwise hides plugin
  * console output behind permission UIs.
  *
- * Plugin config: opencode.json → top-level `delegatedAccess` object. Any
- * shape mismatch is ignored; defaults fill in.
+ * Plugin config: schema-blessed per-plugin tuple form in opencode.json:
+ *
+ *     "plugin": [
+ *       ["opencode-delegated-access@git+...", {
+ *         "enabled": true,
+ *         "safeCountdownMs": 5000
+ *       }]
+ *     ]
+ *
+ * The options object is delivered as the second argument to this factory
+ * (PluginOptions) and parsed via parseConfig(). Invalid shapes fall back
+ * to defaults silently rather than crashing opencode.
+ *
+ * The previously-documented top-level `delegatedAccess` key is no longer
+ * supported because opencode rejects unknown top-level keys at startup.
  */
-const DelegatedAccess: Plugin = async ({ client, worktree, $ }) => {
+const DelegatedAccess: Plugin = async (
+  { client, worktree, $ },
+  options,
+) => {
   const log: Logger = createLogger(client)
   log.info("plugin loaded")
 
@@ -71,10 +87,29 @@ const DelegatedAccess: Plugin = async ({ client, worktree, $ }) => {
     return ctx
   }
 
-  // Config is resolved lazily — we receive the full config blob via the
-  // `config` hook and latch the plugin-specific subsection. Defaults take
-  // over until the first `config` call or if the user never sets any.
-  let config: DelegatedAccessConfig = parseConfig(undefined)
+  // Config is resolved at factory time from the per-plugin tuple options.
+  // parseConfig handles undefined / empty / partial / invalid input by
+  // falling back to defaults. The `config` hook below is no longer used
+  // for plugin-specific config — only for the session's default model.
+  let config: DelegatedAccessConfig
+  try {
+    config = parseConfig(options)
+    log.info("config resolved", {
+      source: options !== undefined ? "tuple" : "defaults",
+      enabled: config.enabled,
+      contextMessageCount: config.contextMessageCount,
+      safeCountdownMs: config.safeCountdownMs,
+      classifierTimeoutMs: config.classifierTimeoutMs,
+      classifierModel: config.classifierModel,
+      externalDirectoryEnabled: config.externalDirectoryEnabled,
+      directoryVerdictCacheTtlMs: config.directoryVerdictCacheTtlMs,
+    })
+  } catch (e) {
+    config = parseConfig(undefined)
+    log.warn("invalid plugin options; using defaults", {
+      error: e instanceof Error ? e.message : String(e),
+    })
+  }
 
   // The session's default model, resolved from opencode's Config. Updated
   // on every `config` call so it stays in sync when the user changes models.
@@ -201,47 +236,16 @@ const DelegatedAccess: Plugin = async ({ client, worktree, $ }) => {
 
   return {
     config: async (input) => {
-      // DIAGNOSTIC: dump the full config shape so we can see exactly what
-      // fields opencode passes. We've already caught the Permission type
-      // declaring `type`/`pattern` while the runtime emits
-      // `permission`/`patterns` — Config may have the same mismatch. Remove
-      // once we've calibrated the model field extraction.
-      try {
-        log.info("raw config shape (diagnostic)", {
-          raw: JSON.stringify(input),
-        })
-      } catch {
-        // JSON.stringify can throw on circular refs; log is best-effort.
-      }
-
-      // Pull out the plugin-specific sub-object. opencode.json permits extra
-      // keys, so we access it via a safe cast.
-      const pluginBlob = (input as unknown as Record<string, unknown>)[
-        "delegatedAccess"
-      ]
-      try {
-        config = parseConfig(pluginBlob)
-      } catch {
-        // Invalid plugin config: stick with the defaults rather than crashing
-        // opencode.
-        config = parseConfig(undefined)
-      }
-
-      // Extract the session's default model for the classifier's
-      // auto-detection. Falls back to `small_model` if the user has one set.
+      // The plugin's own config (enabled, safeCountdownMs, etc.) is no
+      // longer read from this hook — it's resolved at factory time from
+      // the tuple-form PluginOptions. This hook now exists only to
+      // extract the session's default model for the classifier's
+      // auto-detection, falling back to `small_model` if the user has
+      // one set.
       sessionModel =
         parseModelString(input.model) ?? parseModelString(input.small_model)
 
-      // Info level (not debug) so we can tell from the log file whether
-      // the config hook fires at all on this opencode version.
-      log.info("config latched", {
-        enabled: config.enabled,
-        contextMessageCount: config.contextMessageCount,
-        safeCountdownMs: config.safeCountdownMs,
-        classifierTimeoutMs: config.classifierTimeoutMs,
-        classifierModel: config.classifierModel,
-        externalDirectoryEnabled: config.externalDirectoryEnabled,
-        directoryVerdictCacheTtlMs: config.directoryVerdictCacheTtlMs,
+      log.info("session model latched", {
         sessionModel: sessionModel
           ? `${sessionModel.providerID}/${sessionModel.modelID}`
           : null,

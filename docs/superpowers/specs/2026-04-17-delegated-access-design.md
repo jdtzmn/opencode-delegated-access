@@ -252,9 +252,23 @@ The RISKY path sets `output.status = "ask"`, causing OpenCode to show its normal
 
 ## Configuration
 
-The plugin reads its config from OpenCode's config object via the plugin's `config` hook, under a known key (e.g., `experimental.plugins.delegated-access` — exact convention TBD during implementation based on OpenCode's plugin config pattern).
+The plugin reads its config from the **per-plugin tuple form** of OpenCode's `plugin` array:
 
-All fields have sensible defaults; a user who installs the plugin with zero config gets working defaults.
+```jsonc
+{
+  "plugin": [
+    ["opencode-delegated-access@git+...", { "safeCountdownMs": 0 }]
+  ]
+}
+```
+
+The options object is delivered as the second argument to the `Plugin` factory function (`PluginOptions`) and parsed via `parseConfig` at factory time. Invalid shapes fall back to defaults silently rather than crashing OpenCode.
+
+The `config` hook still runs on every config refresh, but only to extract the session's default model (`input.model` / `input.small_model`) for the classifier's auto-detection. The plugin's own config is fixed at factory time.
+
+**Note (post-initial-impl, 2026-04-17):** an earlier iteration read plugin config from a top-level `delegatedAccess` key on the config blob. That approach was abandoned because OpenCode rejects unknown top-level keys at startup, so the form was never actually usable.
+
+All fields have sensible defaults; a user who installs the plugin with zero options gets working defaults.
 
 ## Testing
 
