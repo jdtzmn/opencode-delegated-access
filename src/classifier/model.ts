@@ -13,7 +13,7 @@ export type ModelRef = {
  */
 export const PROVIDER_DEFAULT_SMALL_MODELS: Record<string, string> = {
   anthropic: "claude-haiku-4-5",
-  openai: "gpt-4.1-mini",
+  openai: "gpt-5.4-mini",
   google: "gemini-2.5-flash-lite",
 }
 

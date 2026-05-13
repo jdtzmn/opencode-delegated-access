@@ -26,14 +26,14 @@ describe("resolveClassifierModel", () => {
     })
   })
 
-  it("auto-detects openai → gpt-4.1-mini (or equivalent default)", () => {
+  it("auto-detects openai → gpt-5.4-mini", () => {
     const resolved = resolveClassifierModel({
       configOverride: undefined,
       sessionModel: { providerID: "openai", modelID: "gpt-5" },
     })
     expect(resolved).toEqual({
       providerID: "openai",
-      modelID: PROVIDER_DEFAULT_SMALL_MODELS.openai,
+      modelID: "gpt-5.4-mini",
     })
   })
 

@@ -596,7 +596,7 @@ describe("handlePermissionEvent", () => {
 
     expect(mockedClassify).toHaveBeenCalledTimes(1)
     const classifyArgs = mockedClassify.mock.calls[0]?.[0]
-    // openai has a provider default (gpt-4.1-mini), which the resolver
+    // openai has a provider default (gpt-5.4-mini), which the resolver
     // prefers over the fallback's raw modelID.
     expect(classifyArgs?.model.providerID).toBe("openai")
   })

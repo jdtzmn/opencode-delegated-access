@@ -177,7 +177,7 @@ User messages themselves could still contain injection attempts, but:
 1. If `config.classifierModel` is set (e.g., `"anthropic/claude-haiku-4-5"`), use it directly.
 2. Otherwise, fetch the session's current model via `client.config.get()`, look up provider, use the provider's default small model:
    - `anthropic` → `claude-haiku-4-5`
-   - `openai` → `gpt-4.1-mini` (or `gpt-4o-mini`)
+   - `openai` → `gpt-5.4-mini`
    - `google` → `gemini-2.5-flash-lite`
    - `openrouter` / unknown → fall back to the session's current model
 3. If defaults become stale, users can always override.

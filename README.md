@@ -120,7 +120,7 @@ Use the **per-plugin tuple form** — `[pluginSpec, optionsObject]` — to pass 
 | `enabled` | `true` | Turn the whole thing off without uninstalling. |
 | `contextMessageCount` | `3` | How many of **your** recent messages the classifier sees. 0 = no context, just the command. |
 | `safeCountdownMs` | `5000` | Cancellable countdown before auto-dismissing SAFE prompts. `0` = silent instant approve. |
-| `classifierModel` | _auto_ | Override the judge model, e.g. `anthropic/claude-haiku-4-5`. When unset, uses a small fast default for your provider (Haiku, `gpt-4.1-mini`, `gemini-flash-lite`). |
+| `classifierModel` | _auto_ | Override the judge model, e.g. `anthropic/claude-haiku-4-5`. When unset, uses a small fast default for your provider (Haiku, `gpt-5.4-mini`, `gemini-flash-lite`). |
 | `classifierTimeoutMs` | `15000` | How long before we give up on the classifier and leave the TUI prompt alone. |
 | `notificationSound` | `true` | OS notification sound on/off. |
 | `externalDirectoryEnabled` | `true` | Also classify `external_directory` permissions (directory access outside the current project). Set to `false` to restrict the plugin to bash commands only. |
