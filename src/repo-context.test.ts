@@ -3,6 +3,7 @@ import {
   fetchRepoContext,
   RepoContextCache,
   type BunShellLike,
+  type DualRepoContext,
   type ShellOutput,
   type ShellPromise,
 } from "./repo-context.ts"
@@ -339,5 +340,28 @@ describe("RepoContextCache", () => {
     expect((await cache.get("/a"))?.branch).toBe("main")
     expect((await cache.get("/b"))?.branch).toBe("develop")
     expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe("DualRepoContext type export", () => {
+  it("accepts a pair of nullable RepoContexts", () => {
+    // Pure type-level assertion: compiles when the export exists with
+    // the right shape, fails compilation otherwise.
+    const sample: DualRepoContext = {
+      pinned: { branch: "feat/x" },
+      current: { branch: "feat/x" },
+    }
+    expect(sample.pinned?.branch).toBe("feat/x")
+    expect(sample.current?.branch).toBe("feat/x")
+  })
+
+  it("accepts null for either side", () => {
+    const a: DualRepoContext = { pinned: null, current: { branch: "main" } }
+    const b: DualRepoContext = { pinned: { branch: "main" }, current: null }
+    const c: DualRepoContext = { pinned: null, current: null }
+    expect(a.pinned).toBeNull()
+    expect(b.current).toBeNull()
+    expect(c.pinned).toBeNull()
+    expect(c.current).toBeNull()
   })
 })

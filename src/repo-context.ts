@@ -46,6 +46,29 @@ export type RepoContext = {
   }
 }
 
+/**
+ * Dual repo-context snapshot: the pinned identity (captured once at
+ * session start and frozen for the lifetime of the plugin process) plus
+ * the live identity (refreshed on a short TTL via {@link RepoContextCache}).
+ *
+ * Surfaced to the safety classifier so it can:
+ *   1. Recognise commands that obviously target the human's pre-committed
+ *      PR scope (e.g. `gh pr comment N` where N matches `pinned.openPR.number`).
+ *   2. Detect mismatch between pinned and current — if the agent has moved
+ *      branches/repos mid-session, "elevated trust" for the pinned PR is
+ *      withdrawn.
+ *
+ * Either side may be `null`:
+ *   - `pinned: null` means the worktree wasn't a git repo (or `gh` was
+ *     unavailable) at session start; no elevated trust is ever granted.
+ *   - `current: null` means the live fetch failed or the worktree stopped
+ *     being a git repo mid-session.
+ */
+export type DualRepoContext = {
+  pinned: RepoContext | null
+  current: RepoContext | null
+}
+
 /** Per-shell-out timeout. Keeps a stuck git/gh from blocking forever. */
 const SHELL_TIMEOUT_MS = 5_000
 
