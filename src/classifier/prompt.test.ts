@@ -264,6 +264,27 @@ describe("buildDirectoryClassifierUserPrompt", () => {
       buildDirectoryClassifierUserPrompt(args),
     )
   })
+
+  it("normalises a DualRepoContext to the current slice (no session_* keys)", () => {
+    const dual = {
+      pinned: {
+        branch: "feat/x",
+        openPR: { number: 7, title: "Pinned", baseBranch: "main" },
+      },
+      current: {
+        branch: "feat/y",
+        openPR: undefined,
+      },
+    }
+    const prompt = buildDirectoryClassifierUserPrompt({
+      subject: "/some/path",
+      userMessages: [],
+      repoContext: dual,
+    })
+    expect(prompt).toMatch(/branch: feat\/y/)
+    expect(prompt).not.toMatch(/session_branch/)
+    expect(prompt).not.toMatch(/current_branch/)
+  })
 })
 
 // ---------------------------------------------------------------------------

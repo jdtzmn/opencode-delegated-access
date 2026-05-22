@@ -5,7 +5,7 @@ import {
 } from "./prompt.ts"
 import { parseVerdict, type Verdict } from "./parse.ts"
 import type { ModelRef } from "./model.ts"
-import type { RepoContext } from "../repo-context.ts"
+import type { RepoContext, DualRepoContext } from "../repo-context.ts"
 import type { ApprovalEntry } from "../permission/approval-history.ts"
 
 type OpencodeClient = ReturnType<typeof createOpencodeClient>
@@ -56,16 +56,18 @@ export async function classifySubject(args: {
   buildUserPrompt: (args: {
     subject: string
     userMessages: string[]
-    repoContext?: RepoContext | null
+    repoContext?: DualRepoContext | RepoContext | null
     priorApprovals?: ApprovalEntry[]
   }) => string
   /**
-   * Optional repo context (branch + open PR) handed to the classifier as
-   * additional decision-shaping signal. `null` means "unavailable" (not
-   * a git repo, gh missing, etc.) and is rendered as no <repo_context>
-   * block in the prompt.
+   * Optional repo context handed to the classifier as additional
+   * decision-shaping signal. Accepts either the legacy single-snapshot
+   * `RepoContext` or the newer `DualRepoContext` (session-pinned + live)
+   * for PR-scoped elevated trust. Rendered into the prompt by the
+   * caller-supplied builder. `null` means "unavailable" (not a git repo,
+   * gh missing, etc.) and is rendered as no <repo_context> block.
    */
-  repoContext?: RepoContext | null
+  repoContext?: DualRepoContext | RepoContext | null
   /**
    * Pre-sorted (newest first) list of recent human approval/rejection
    * decisions to surface to the classifier as prior-decision evidence.

@@ -175,14 +175,22 @@ REASON: <one short sentence>`
 export function buildDirectoryClassifierUserPrompt(args: {
   subject: string
   userMessages: string[]
-  repoContext?: RepoContext | null
+  repoContext?: DualRepoContext | RepoContext | null
   priorApprovals?: ApprovalEntry[]
 }): string {
   const { subject, userMessages, repoContext, priorApprovals } = args
   const count = userMessages.length
   const body = userMessages.join("\n---\n")
 
-  const repoBlock = renderRepoContext(repoContext ?? null)
+  // Directory classifier doesn't use the session/current split — its
+  // system prompt only reads legacy single-shape fields. Normalise a
+  // DualRepoContext to its `current` slice so the rendered block stays
+  // single-shape regardless of what the caller hands us.
+  const repoForRender =
+    repoContext && typeof repoContext === "object" && "pinned" in repoContext && "current" in repoContext
+      ? (repoContext as DualRepoContext).current
+      : (repoContext as RepoContext | null | undefined) ?? null
+  const repoBlock = renderRepoContext(repoForRender)
   const repoSection = repoBlock ? `${repoBlock}\n\n` : ""
 
   const priorBlock = renderPriorApprovals(priorApprovals ?? [])

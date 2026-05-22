@@ -348,6 +348,32 @@ describe("classifyCommand", () => {
     expect(userText).toContain("open_pr_number: 42")
   })
 
+  it("renders dual repo context (session + current) in the user prompt", async () => {
+    const { client, calls } = mockClient({})
+    await classifyCommand({
+      ...baseArgs,
+      client,
+      repoContext: {
+        pinned: {
+          branch: "feat/foo",
+          openPR: { number: 42, title: "Test PR", baseBranch: "main" },
+        },
+        current: {
+          branch: "feat/foo",
+          openPR: { number: 42, title: "Test PR", baseBranch: "main" },
+        },
+      },
+    })
+
+    const arg = calls.prompt.mock.calls[0]?.[0]
+    const userText = (arg?.body?.parts?.[0] as { text?: string })?.text ?? ""
+    expect(userText).toContain("<repo_context>")
+    expect(userText).toContain("session_branch: feat/foo")
+    expect(userText).toContain("session_open_pr_number: 42")
+    expect(userText).toContain("current_branch: feat/foo")
+    expect(userText).toContain("current_open_pr_number: 42")
+  })
+
   it("omits <repo_context> when repoContext is null or undefined", async () => {
     const { client, calls } = mockClient({})
     await classifyCommand({
@@ -516,7 +542,10 @@ describe("classifySubject", () => {
     const fakeBuilder = (args: {
       subject: string
       userMessages: string[]
-      repoContext?: import("../repo-context.ts").RepoContext | null
+      repoContext?:
+        | import("../repo-context.ts").DualRepoContext
+        | import("../repo-context.ts").RepoContext
+        | null
       priorApprovals?: ApprovalEntry[]
     }) => {
       captured.priorApprovals = args.priorApprovals
