@@ -1,6 +1,6 @@
 {
   "name": "opencode-delegated-access",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "OpenCode plugin that auto-approves safe bash commands via an LLM safety classifier and escalates risky ones with an OS notification.",
   "type": "module",
   "main": "./src/index.ts",
