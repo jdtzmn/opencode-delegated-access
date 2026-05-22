@@ -192,6 +192,8 @@ const DelegatedAccess: Plugin = async (
       classifierModel: config.classifierModel,
       externalDirectoryEnabled: config.externalDirectoryEnabled,
       directoryVerdictCacheTtlMs: config.directoryVerdictCacheTtlMs,
+      approvalHistoryEnabled: config.approvalHistoryEnabled,
+      approvalHistoryMax: config.approvalHistoryMax,
     })
   } catch (e) {
     config = parseConfig(undefined)
