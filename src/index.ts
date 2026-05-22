@@ -15,7 +15,6 @@ import type { ModelRef } from "./classifier/model.ts"
 import { createLogger, type Logger } from "./log.ts"
 import {
   RepoContextCache,
-  fetchRepoContext,
   type BunShellLike,
   type DualRepoContext,
 } from "./repo-context.ts"
@@ -169,16 +168,20 @@ const DelegatedAccess: Plugin = async (
   // process. Compared against the live `repoContextCache` so the
   // classifier can detect when the agent has moved off the human's
   // pre-committed branch/PR.
+  // Share the live cache's fetcher so the first permission event only
+  // pays for ONE git+gh round-trip — the session pin reads through the
+  // cache's first-call result and freezes it forever, while the cache
+  // continues refreshing it on its normal TTL.
   const sessionRepoContext = new SessionRepoContext({
     worktree,
-    fetcher: (cwd) => fetchRepoContext($ as unknown as BunShellLike, cwd),
+    fetcher: (cwd) => repoContextCache.get(cwd),
   })
 
   // Track whether we've already logged a "repo context unavailable" line
   // so we don't spam the log on every permission event when gh is missing.
   let loggedRepoContextUnavailable = false
 
-  async function getRepoContext(): Promise<DualRepoContext | null> {
+  async function getRepoContext(): Promise<DualRepoContext> {
     const [pinned, current] = await Promise.all([
       sessionRepoContext.getPinned(),
       repoContextCache.get(worktree),
