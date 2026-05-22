@@ -215,17 +215,22 @@ function renderRepoContext(repo: RepoContext | null): string {
  * `subject (label):`, `classifier_said:`, and `classifier_reason:` keys
  * so the model gets clear, parseable evidence rather than free-form
  * prose. Format mirrors the data-block style used by <repo_context> for
- * consistency.
+ * consistency. Field values are whitespace-flattened so embedded newlines
+ * can't break the key:value layout.
  */
 function renderPriorApprovals(entries: ApprovalEntry[]): string {
   if (entries.length === 0) return ""
   const blocks = entries.map((e) => {
     return [
-      `response: ${e.response}`,
-      `subject (${e.subjectLabel}): ${e.subject}`,
-      `classifier_said: ${e.classifierVerdict}`,
-      `classifier_reason: ${e.classifierReason}`,
+      `response: ${flattenWhitespace(e.response)}`,
+      `subject (${e.subjectLabel}): ${flattenWhitespace(e.subject)}`,
+      `classifier_said: ${flattenWhitespace(e.classifierVerdict)}`,
+      `classifier_reason: ${flattenWhitespace(e.classifierReason)}`,
     ].join("\n")
   })
   return `<prior_human_approvals count="${entries.length}">\n${blocks.join("\n---\n")}\n</prior_human_approvals>`
+}
+
+function flattenWhitespace(s: string): string {
+  return s.replace(/\s+/g, " ").trim()
 }
