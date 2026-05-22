@@ -231,7 +231,7 @@ export async function handlePermissionEvent(
  */
 async function handleSubjectPermission(args: {
   subject: string
-  subjectLabel: string
+  subjectLabel: "command" | "path"
   systemPrompt: string | null
   permission: Permission
   ctx: HandlerContext
@@ -287,7 +287,7 @@ async function handleSubjectPermission(args: {
   ctx.pendingSubjects.set(permission.id, {
     rootSessionID,
     subject,
-    subjectLabel: subjectLabel === "path" ? "path" : "command",
+    subjectLabel,
     classifierVerdict: null,
     classifierReason: null,
     autoApproved: false,
@@ -482,7 +482,7 @@ async function handleSubjectPermission(args: {
 async function runSafeOrRiskyPath(args: {
   verdict: import("../classifier/parse.ts").Verdict
   subject: string
-  subjectLabel: string
+  subjectLabel: "command" | "path"
   permission: Permission
   ctx: HandlerContext
   output: HandlerOutput | undefined

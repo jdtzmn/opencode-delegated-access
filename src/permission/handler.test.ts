@@ -1037,6 +1037,14 @@ describe("handlePermissionEvent (external_directory)", () => {
 })
 
 describe("approval history wiring", () => {
+  beforeEach(() => {
+    // The new wiring tests always use sess_test as the root; pin it
+    // explicitly rather than relying on `mockReset` leaving the mock as
+    // `undefined` (which would propagate as the rootSessionID and break
+    // the priorApprovals lookup test).
+    mockedResolveRoot.mockResolvedValue("sess_test")
+  })
+
   it("seeds a pending subject when a bash permission first fires", async () => {
     const pending = new PendingSubjectsMap()
     mockedClassify.mockResolvedValue({ verdict: "RISKY", reason: "test" })
