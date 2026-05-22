@@ -20,6 +20,93 @@ import {
 } from "./repo-context.ts"
 
 /**
+ * Pure handler for `permission.replied` events. Looks up the matching
+ * pending subject (set by the permission.updated path), filters out our
+ * own auto-approvals, and appends a human-decision entry to the
+ * approval history.
+ *
+ * Exported so unit tests can exercise it without spinning up the full
+ * plugin factory. The plugin's `event` hook delegates to this on
+ * `event.type === "permission.replied"`.
+ */
+export function handlePermissionReplied(
+  properties: {
+    sessionID: string
+    permissionID: string
+    response: string
+  },
+  deps: {
+    pendingSubjects: PendingSubjectsMap
+    approvalHistory: ApprovalHistoryStore
+    config: DelegatedAccessConfig
+    log: Logger
+    now?: () => number
+  },
+): void {
+  const { pendingSubjects, approvalHistory, config, log } = deps
+  const now = deps.now ?? Date.now
+
+  if (!config.approvalHistoryEnabled) {
+    log.debug("permission.replied: history disabled", {
+      permissionID: properties.permissionID,
+    })
+    return
+  }
+
+  const pending = pendingSubjects.take(properties.permissionID)
+  if (!pending) {
+    log.debug("permission.replied: no pending subject for permissionID", {
+      permissionID: properties.permissionID,
+    })
+    return
+  }
+
+  if (pending.autoApproved) {
+    log.debug("permission.replied: skipping our own auto-approval", {
+      permissionID: properties.permissionID,
+      subject: pending.subject,
+    })
+    return
+  }
+
+  const response = properties.response
+  if (response !== "once" && response !== "always" && response !== "reject") {
+    log.warn("permission.replied: unrecognised response value", {
+      permissionID: properties.permissionID,
+      response,
+    })
+    return
+  }
+
+  if (pending.classifierVerdict === null) {
+    // Human resolved before classifier returned — still record, but with
+    // a clear marker that we have no classifier verdict to associate.
+    log.info("permission.replied: human resolved before classifier", {
+      permissionID: properties.permissionID,
+      response,
+    })
+  }
+
+  approvalHistory.record(pending.rootSessionID, {
+    subject: pending.subject,
+    subjectLabel: pending.subjectLabel,
+    response,
+    classifierVerdict: pending.classifierVerdict ?? "RISKY",
+    classifierReason:
+      pending.classifierReason ??
+      "(classifier did not complete before human resolved)",
+    timestamp: now(),
+  })
+
+  log.info("recorded human approval decision", {
+    rootSessionID: pending.rootSessionID,
+    permissionID: properties.permissionID,
+    response,
+    subject: pending.subject,
+  })
+}
+
+/**
  * OpenCode plugin entry point.
  *
  * We register THREE permission-related hooks as a "shotgun" strategy for
@@ -132,7 +219,9 @@ const DelegatedAccess: Plugin = async (
   // scoped by root session ID. Surfaced to the classifier as prior-decision
   // evidence; written by the `permission.replied` event handler when the
   // human actually resolves a permission.
-  const approvalHistory = new ApprovalHistoryStore()
+  const approvalHistory = new ApprovalHistoryStore({
+    maxPerSession: config.approvalHistoryMax,
+  })
 
   // Short-lived map of `permissionID → { rootSessionID, subject, ... }` that
   // bridges the gap between rich subject info seen at permission-fire time
@@ -288,9 +377,41 @@ const DelegatedAccess: Plugin = async (
     } as Record<string, (input: unknown) => Promise<void>>),
 
     // Path 3: generic event hook. Filter to permission.asked /
-    // permission.updated event types.
+    // permission.updated / permission.replied event types.
     event: async ({ event }) => {
       const type: string = event.type
+
+      if (type === "permission.replied") {
+        const props = (event as { properties?: unknown }).properties
+        if (
+          !props ||
+          typeof props !== "object" ||
+          typeof (props as { sessionID?: unknown }).sessionID !== "string" ||
+          typeof (props as { permissionID?: unknown }).permissionID !==
+            "string" ||
+          typeof (props as { response?: unknown }).response !== "string"
+        ) {
+          log.warn("permission.replied: malformed event properties", {
+            properties: props,
+          })
+          return
+        }
+        handlePermissionReplied(
+          props as {
+            sessionID: string
+            permissionID: string
+            response: string
+          },
+          {
+            pendingSubjects,
+            approvalHistory,
+            config,
+            log,
+          },
+        )
+        return
+      }
+
       if (type !== "permission.asked" && type !== "permission.updated") return
 
       const permission = extractPermission(event)
