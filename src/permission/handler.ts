@@ -23,7 +23,7 @@ import { runSafePath } from "./safe-path.ts"
 import type { SafePathBatcher } from "./safe-path-batcher.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
 import type { Logger } from "../log.ts"
-import type { RepoContext } from "../repo-context.ts"
+import type { RepoContext, DualRepoContext } from "../repo-context.ts"
 
 type OpencodeClient = ReturnType<typeof createOpencodeClient>
 
@@ -87,12 +87,17 @@ export type HandlerContext = {
   /** Logger for diagnostic output. */
   log: Logger
   /**
-   * Lazy fetcher for repo context (branch + open PR), shared across
+   * Lazy fetcher for repo context (pinned + live), shared across
    * permission events. Returns `null` when the worktree isn't a git repo
    * or fetching fails. Keep it on `ctx` so the handler stays decoupled
    * from the cache implementation.
+   *
+   * Production callers return a {@link DualRepoContext} so the classifier
+   * can detect pinned-vs-current mismatch. The legacy single-snapshot
+   * `RepoContext` return type is still accepted so existing tests don't
+   * have to be rewritten.
    */
-  getRepoContext?: () => Promise<RepoContext | null>
+  getRepoContext?: () => Promise<DualRepoContext | RepoContext | null>
 }
 
 /**
@@ -387,7 +392,7 @@ async function handleSubjectPermission(args: {
 
   // Best-effort fetch of repo context (branch + open PR). Cached upstream
   // with a short TTL so back-to-back permissions don't all re-fetch.
-  let repoContext: RepoContext | null = null
+  let repoContext: DualRepoContext | RepoContext | null = null
   if (ctx.getRepoContext) {
     try {
       repoContext = await ctx.getRepoContext()
@@ -403,8 +408,10 @@ async function handleSubjectPermission(args: {
     [subjectLabel]: subject,
     classifierModel: `${model.providerID}/${model.modelID}`,
     modelSource,
-    repoBranch: repoContext?.branch ?? null,
-    repoOpenPR: repoContext?.openPR?.number ?? null,
+    sessionBranch: pickBranch(repoContext, "pinned"),
+    sessionOpenPR: pickOpenPR(repoContext, "pinned"),
+    currentBranch: pickBranch(repoContext, "current"),
+    currentOpenPR: pickOpenPR(repoContext, "current"),
     priorApprovalCount: priorApprovals.length,
   })
 
@@ -595,4 +602,36 @@ function extractCommand(
     if (typeof first === "string" && first.length > 0) return first
   }
   return null
+}
+
+/**
+ * Extract a branch name from either a single or dual repo context for
+ * structured logging. Returns null when the requested side is unavailable.
+ */
+function pickBranch(
+  repo: DualRepoContext | RepoContext | null,
+  side: "pinned" | "current",
+): string | null {
+  if (!repo) return null
+  if ("pinned" in repo && "current" in repo) {
+    return repo[side]?.branch ?? null
+  }
+  // Legacy single shape — log it under the "current" side only.
+  return side === "current" ? repo.branch ?? null : null
+}
+
+/**
+ * Extract an open-PR number from either a single or dual repo context for
+ * structured logging. Returns null when the requested side has no open PR
+ * or is unavailable.
+ */
+function pickOpenPR(
+  repo: DualRepoContext | RepoContext | null,
+  side: "pinned" | "current",
+): number | null {
+  if (!repo) return null
+  if ("pinned" in repo && "current" in repo) {
+    return repo[side]?.openPR?.number ?? null
+  }
+  return side === "current" ? repo.openPR?.number ?? null : null
 }

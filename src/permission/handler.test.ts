@@ -1217,3 +1217,43 @@ describe("approval history wiring", () => {
     expect(taken?.classifierReason).toBe("looks fine")
   })
 })
+
+describe("dual repo context wiring", () => {
+  beforeEach(() => {
+    mockedResolveRoot.mockResolvedValue("sess_test")
+  })
+
+  it("passes the dual repo context through to the classifier", async () => {
+    mockedClassify.mockResolvedValue({ verdict: "SAFE", reason: "stub" })
+    mockedSafe.mockResolvedValue("allow")
+    const { ctx } = buildCtx({
+      getRepoContext: async () => ({
+        pinned: {
+          branch: "feat/x",
+          openPR: { number: 99, title: "P", baseBranch: "main" },
+        },
+        current: {
+          branch: "feat/x",
+          openPR: { number: 99, title: "P", baseBranch: "main" },
+        },
+      }),
+    })
+
+    await handlePermissionEvent(
+      {
+        id: "perm_dual",
+        sessionID: "sess_test",
+        type: "bash",
+        pattern: ["gh pr comment 99 -b 'reply'"],
+      } as unknown as Parameters<typeof handlePermissionEvent>[0],
+      ctx,
+    )
+
+    expect(mockedClassify).toHaveBeenCalledTimes(1)
+    const args = mockedClassify.mock.calls[0]?.[0]
+    expect(args?.repoContext).toMatchObject({
+      pinned: { branch: "feat/x" },
+      current: { branch: "feat/x" },
+    })
+  })
+})
