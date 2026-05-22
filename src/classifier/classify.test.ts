@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest"
 import { classifyCommand, classifySubject } from "./classify.ts"
 import type { Verdict } from "./parse.ts"
+import type { ApprovalEntry } from "../permission/approval-history.ts"
 
 /**
  * Build a mock opencode client whose session.create / prompt / delete methods
@@ -360,6 +361,37 @@ describe("classifyCommand", () => {
     expect(userText).not.toContain("<repo_context>")
   })
 
+  it("includes <prior_human_approvals> in the prompt when priorApprovals is supplied", async () => {
+    const { client, calls } = mockClient({})
+    const prior: ApprovalEntry = {
+      subject: "gh pr comment 1 -b 'a'",
+      subjectLabel: "command",
+      response: "once",
+      classifierVerdict: "RISKY",
+      classifierReason: "PR not matched",
+      timestamp: 1_000,
+    }
+    await classifyCommand({
+      ...baseArgs,
+      client,
+      priorApprovals: [prior],
+    })
+
+    const arg = calls.prompt.mock.calls[0]?.[0]
+    const userText = (arg?.body?.parts?.[0] as { text?: string })?.text ?? ""
+    expect(userText).toContain("<prior_human_approvals")
+    expect(userText).toContain("subject (command): gh pr comment 1 -b 'a'")
+  })
+
+  it("omits <prior_human_approvals> when priorApprovals is empty or undefined", async () => {
+    const { client, calls } = mockClient({})
+    await classifyCommand({ ...baseArgs, client })
+
+    const arg = calls.prompt.mock.calls[0]?.[0]
+    const userText = (arg?.body?.parts?.[0] as { text?: string })?.text ?? ""
+    expect(userText).not.toContain("<prior_human_approvals")
+  })
+
   it("invokes onEphemeralSessionCreated and onEphemeralSessionDeleted around the classifier call", async () => {
     const { client } = mockClient({})
     const created = vi.fn()
@@ -477,5 +509,36 @@ describe("classifySubject", () => {
     })
     const result = await classifySubject({ ...subjectBaseArgs, client })
     expect(result).toBeNull()
+  })
+
+  it("forwards priorApprovals to the caller-supplied buildUserPrompt", async () => {
+    const captured: { priorApprovals?: ApprovalEntry[] } = {}
+    const fakeBuilder = (args: {
+      subject: string
+      userMessages: string[]
+      repoContext?: import("../repo-context.ts").RepoContext | null
+      priorApprovals?: ApprovalEntry[]
+    }) => {
+      captured.priorApprovals = args.priorApprovals
+      return `subject=${args.subject}`
+    }
+    const prior: ApprovalEntry = {
+      subject: "/some/path/*",
+      subjectLabel: "path",
+      response: "once",
+      classifierVerdict: "RISKY",
+      classifierReason: "no context",
+      timestamp: 2_000,
+    }
+
+    const { client } = mockClient({})
+    await classifySubject({
+      ...subjectBaseArgs,
+      client,
+      buildUserPrompt: fakeBuilder,
+      priorApprovals: [prior],
+    })
+
+    expect(captured.priorApprovals).toEqual([prior])
   })
 })

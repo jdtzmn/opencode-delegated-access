@@ -6,6 +6,7 @@ import {
 import { parseVerdict, type Verdict } from "./parse.ts"
 import type { ModelRef } from "./model.ts"
 import type { RepoContext } from "../repo-context.ts"
+import type { ApprovalEntry } from "../permission/approval-history.ts"
 
 type OpencodeClient = ReturnType<typeof createOpencodeClient>
 
@@ -56,6 +57,7 @@ export async function classifySubject(args: {
     subject: string
     userMessages: string[]
     repoContext?: RepoContext | null
+    priorApprovals?: ApprovalEntry[]
   }) => string
   /**
    * Optional repo context (branch + open PR) handed to the classifier as
@@ -64,6 +66,13 @@ export async function classifySubject(args: {
    * block in the prompt.
    */
   repoContext?: RepoContext | null
+  /**
+   * Pre-sorted (newest first) list of recent human approval/rejection
+   * decisions to surface to the classifier as prior-decision evidence.
+   * Forwarded verbatim to `buildUserPrompt`. Empty / undefined → no
+   * `<prior_human_approvals>` block in the prompt.
+   */
+  priorApprovals?: ApprovalEntry[]
   /**
    * Called with the ephemeral classifier session's ID as soon as it's
    * created. Callers can track these IDs to filter out downstream
@@ -89,6 +98,7 @@ export async function classifySubject(args: {
     systemPrompt,
     buildUserPrompt,
     repoContext,
+    priorApprovals,
     onEphemeralSessionCreated,
     onEphemeralSessionDeleted,
   } = args
@@ -116,6 +126,7 @@ export async function classifySubject(args: {
       subject,
       userMessages,
       repoContext: repoContext ?? null,
+      priorApprovals: priorApprovals ?? [],
     })
 
     const promptCall = client.session.prompt({
@@ -201,11 +212,12 @@ export function classifyCommand(
     ...rest,
     subject: command,
     systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-    buildUserPrompt: ({ subject, userMessages, repoContext }) =>
+    buildUserPrompt: ({ subject, userMessages, repoContext, priorApprovals }) =>
       buildClassifierUserPrompt({
         command: subject,
         userMessages,
         repoContext: repoContext ?? null,
+        priorApprovals: priorApprovals ?? [],
       }),
   })
 }
