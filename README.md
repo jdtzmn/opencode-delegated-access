@@ -106,7 +106,9 @@ Use the **per-plugin tuple form** — `[pluginSpec, optionsObject]` — to pass 
         "classifierTimeoutMs": 15000,
         "notificationSound": true,
         "externalDirectoryEnabled": true,
-        "directoryVerdictCacheTtlMs": 60000
+        "directoryVerdictCacheTtlMs": 60000,
+        "approvalHistoryEnabled": true,
+        "approvalHistoryMax": 20
       }
     ]
   ]
@@ -125,6 +127,8 @@ Use the **per-plugin tuple form** — `[pluginSpec, optionsObject]` — to pass 
 | `notificationSound` | `true` | OS notification sound on/off. |
 | `externalDirectoryEnabled` | `true` | Also classify `external_directory` permissions (directory access outside the current project). Set to `false` to restrict the plugin to bash commands only. |
 | `directoryVerdictCacheTtlMs` | `60000` | How long (ms) a SAFE directory verdict is cached. Covers rapid burst requests (agent walking a tree) without re-classifying each sub-path individually. `0` disables the cache. |
+| `approvalHistoryEnabled` | `true` | Remember each human Approve/Reject decision made via the OpenCode TUI or our notification, and surface recent ones to the classifier as prior-decision context. Session-scoped, in-memory only. |
+| `approvalHistoryMax` | `20` | Per-session cap on how many recent human decisions the classifier sees. `0` disables playback (entries are still recorded; just not surfaced). |
 
 ### Use OpenCode's existing permission rules for fast-path patterns
 
@@ -162,9 +166,21 @@ The desktop notifications with Approve / Reject buttons work via `terminal-notif
 - **The directory cache only speeds things up; it can't change a RISKY verdict.** Only SAFE verdicts are cached. A RISKY verdict for any path always triggers the escalation notification — the cache only deduplicates rapid burst requests for a path that was already classified SAFE.
 - **Repo context is best-effort and gracefully optional.** Branch is read with `git`; the open-PR lookup uses `gh`. If `gh` isn't installed, isn't authenticated, or the working directory isn't a git repo, the classifier just runs without that context — never blocks. The PR title is rendered inside `<repo_context>` delimiters and treated as data (not instructions) by the classifier.
 
+## Session approval history
+
+If you Approve or Reject a permission in this session — either via OpenCode's TUI prompt or via the desktop notification's buttons — Delegated Access remembers your decision. The next time a similar request comes up, the classifier sees a brief `<prior_human_approvals>` block in its prompt summarising what you previously decided in this session, and may use that as evidence to lean toward your earlier judgment.
+
+A few important properties of how this works:
+
+- **Session-scoped only.** The history lives in memory for the lifetime of the OpenCode session group and is never written to disk. Closing OpenCode discards it.
+- **Pure human signal.** When the classifier auto-approves a SAFE command, that decision is NOT recorded — only your explicit Approve/Reject clicks are. The history is the record of what _you_ decided, not what the classifier decided for you.
+- **Hard-RISKY categories still escalate.** Prior approvals don't override the destructive / privilege-escalation / credential-access categories. Approving `git status` 30 times doesn't teach the classifier to wave through `sudo rm -rf /`.
+- **Captures every channel.** Decisions made via the TUI (clicking Approve in OpenCode's prompt), the desktop notification (clicking Approve in our `terminal-notifier` popup), or OpenCode's CLI/keyboard shortcuts all flow through the same `permission.replied` event and are captured identically.
+- **Disable with `approvalHistoryEnabled: false`** in your config if you'd rather every classification be independent.
+
 ## Status
 
-v0.2.0. Bash commands and external directory access. Edit / write / webfetch still prompt normally — those are out of scope. TypeScript, Bun. macOS-tested; Linux/Windows should work with degraded notification interactivity.
+v0.3.0. Bash commands and external directory access, with per-session approval history that lets the classifier learn from your prior in-session decisions. Edit / write / webfetch still prompt normally — those are out of scope. TypeScript, Bun. macOS-tested; Linux/Windows should work with degraded notification interactivity.
 
 ## Development
 
