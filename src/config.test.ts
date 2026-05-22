@@ -22,6 +22,8 @@ describe("ConfigSchema", () => {
       notificationSound: false,
       externalDirectoryEnabled: false,
       directoryVerdictCacheTtlMs: 30_000,
+      approvalHistoryEnabled: false,
+      approvalHistoryMax: 100,
     }
     expect(ConfigSchema.parse(input)).toEqual(input)
   })
@@ -68,6 +70,8 @@ describe("ConfigSchema", () => {
       notificationSound: true,
       externalDirectoryEnabled: true,
       directoryVerdictCacheTtlMs: 60_000,
+      approvalHistoryEnabled: true,
+      approvalHistoryMax: 20,
     })
   })
 
@@ -81,5 +85,29 @@ describe("ConfigSchema", () => {
     expect(() =>
       ConfigSchema.parse({ directoryVerdictCacheTtlMs: -1 }),
     ).toThrow()
+  })
+})
+
+describe("approvalHistory options", () => {
+  it("defaults approvalHistoryEnabled to true", () => {
+    const c = parseConfig({})
+    expect(c.approvalHistoryEnabled).toBe(true)
+  })
+
+  it("defaults approvalHistoryMax to 20", () => {
+    const c = parseConfig({})
+    expect(c.approvalHistoryMax).toBe(20)
+  })
+
+  it("accepts approvalHistoryEnabled = false", () => {
+    const c = parseConfig({ approvalHistoryEnabled: false })
+    expect(c.approvalHistoryEnabled).toBe(false)
+  })
+
+  it("clamps approvalHistoryMax to its allowed range", () => {
+    expect(() => parseConfig({ approvalHistoryMax: -1 })).toThrow()
+    expect(() => parseConfig({ approvalHistoryMax: 1001 })).toThrow()
+    expect(parseConfig({ approvalHistoryMax: 0 }).approvalHistoryMax).toBe(0)
+    expect(parseConfig({ approvalHistoryMax: 50 }).approvalHistoryMax).toBe(50)
   })
 })

@@ -56,6 +56,25 @@ export const ConfigSchema = z.object({
     .min(0)
     .max(300_000)
     .default(60_000),
+
+  /**
+   * Master toggle for the per-session approval-history feature. When true
+   * (default), the plugin remembers each TUI / notification approval and
+   * rejection the human makes during this session and feeds the recent
+   * entries into the classifier prompt as prior-decision context. When
+   * false, no recording or playback happens — classifier behaviour is
+   * identical to versions before this feature shipped.
+   */
+  approvalHistoryEnabled: z.boolean().default(true),
+
+  /**
+   * Maximum number of recent human approval/rejection entries to pass
+   * into the classifier prompt for any one permission decision. Also
+   * acts as the per-session retention cap. Set to 0 to disable playback
+   * (entries are still recorded; just not surfaced to the classifier).
+   * Capped at 1000 to bound prompt size and memory.
+   */
+  approvalHistoryMax: z.number().int().min(0).max(1000).default(20),
 })
 
 export type DelegatedAccessConfig = z.infer<typeof ConfigSchema>
