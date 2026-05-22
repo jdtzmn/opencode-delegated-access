@@ -234,3 +234,23 @@ export class RepoContextCache {
     return promise
   }
 }
+
+/**
+ * Type guard that narrows a value to {@link DualRepoContext}. Returns true
+ * when the value has both `pinned` and `current` keys, false when it's a
+ * single-snapshot {@link RepoContext} (or anything else).
+ *
+ * Exported so the classifier prompt renderer and the permission handler
+ * can share one discriminator instead of duplicating the same `"pinned"
+ * in x && "current" in x` check across files.
+ */
+export function isDualRepoContext(
+  x: DualRepoContext | RepoContext,
+): x is DualRepoContext {
+  return (
+    typeof x === "object" &&
+    x !== null &&
+    "pinned" in x &&
+    "current" in x
+  )
+}

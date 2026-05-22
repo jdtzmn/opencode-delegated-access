@@ -1,4 +1,8 @@
-import type { RepoContext, DualRepoContext } from "../repo-context.ts"
+import {
+  isDualRepoContext,
+  type RepoContext,
+  type DualRepoContext,
+} from "../repo-context.ts"
 import type { ApprovalEntry } from "../permission/approval-history.ts"
 
 /**
@@ -194,7 +198,7 @@ export function buildDirectoryClassifierUserPrompt(args: {
   // DualRepoContext to its `current` slice so the rendered block stays
   // single-shape regardless of what the caller hands us.
   const repoForRender =
-    repoContext && isDual(repoContext)
+    repoContext && isDualRepoContext(repoContext)
       ? repoContext.current
       : repoContext ?? null
   const repoBlock = renderRepoContext(repoForRender)
@@ -225,7 +229,7 @@ function renderRepoContext(
   // Dual shape: render session_* + current_* keys so the classifier can
   // detect pin-vs-live mismatch. When both sides are null we render
   // nothing (no useful signal to surface).
-  if (isDual(repo)) {
+  if (isDualRepoContext(repo)) {
     if (repo.pinned === null && repo.current === null) return ""
     const sessionLines =
       repo.pinned === null
@@ -268,17 +272,6 @@ function sideLines(prefix: "session" | "current", repo: RepoContext): string[] {
     lines.push(`${prefix}_open_pr: none`)
   }
   return lines
-}
-
-function isDual(
-  x: DualRepoContext | RepoContext,
-): x is DualRepoContext {
-  return (
-    typeof x === "object" &&
-    x !== null &&
-    "pinned" in x &&
-    "current" in x
-  )
 }
 
 /**

@@ -23,7 +23,11 @@ import { runSafePath } from "./safe-path.ts"
 import type { SafePathBatcher } from "./safe-path-batcher.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
 import type { Logger } from "../log.ts"
-import type { RepoContext, DualRepoContext } from "../repo-context.ts"
+import {
+  isDualRepoContext,
+  type RepoContext,
+  type DualRepoContext,
+} from "../repo-context.ts"
 
 type OpencodeClient = ReturnType<typeof createOpencodeClient>
 
@@ -613,7 +617,7 @@ function pickBranch(
   side: "pinned" | "current",
 ): string | null {
   if (!repo) return null
-  if ("pinned" in repo && "current" in repo) {
+  if (isDualRepoContext(repo)) {
     return repo[side]?.branch ?? null
   }
   // Legacy single shape — log it under the "current" side only.
@@ -630,7 +634,7 @@ function pickOpenPR(
   side: "pinned" | "current",
 ): number | null {
   if (!repo) return null
-  if ("pinned" in repo && "current" in repo) {
+  if (isDualRepoContext(repo)) {
     return repo[side]?.openPR?.number ?? null
   }
   return side === "current" ? repo.openPR?.number ?? null : null
