@@ -530,3 +530,28 @@ describe("event hook wiring for permission.replied", () => {
     // No throw means the malformed-event guard worked.
   })
 })
+
+describe("DualRepoContext factory wiring", () => {
+  beforeEach(() => {
+    mockedHandle.mockReset()
+    mockedHandle.mockImplementation(async () => {
+      // Default: no-op.
+    })
+  })
+
+  it("getRepoContext returns a DualRepoContext with pinned and current fields", async () => {
+    const hooks = await makePluginHooks()
+    await hooks["permission.updated"]!(basePermission() as never)
+    const ctx = mockedHandle.mock.calls[0]?.[1]
+    expect(typeof ctx?.getRepoContext).toBe("function")
+
+    // Calling it returns an object with both keys (both may be null when
+    // the test environment isn't a git repo — what matters is the shape).
+    const dual = await ctx!.getRepoContext!()
+    expect(dual).not.toBeNull()
+    if (dual !== null) {
+      expect("pinned" in dual).toBe(true)
+      expect("current" in dual).toBe(true)
+    }
+  })
+})

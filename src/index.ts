@@ -15,9 +15,11 @@ import type { ModelRef } from "./classifier/model.ts"
 import { createLogger, type Logger } from "./log.ts"
 import {
   RepoContextCache,
+  fetchRepoContext,
   type BunShellLike,
-  type RepoContext,
+  type DualRepoContext,
 } from "./repo-context.ts"
+import { SessionRepoContext } from "./session-repo-context.ts"
 
 /**
  * Pure handler for `permission.replied` events. Looks up the matching
@@ -155,25 +157,41 @@ const DelegatedAccess: Plugin = async (
   const log: Logger = createLogger(client)
   log.info("plugin loaded")
 
-  // Repo-context cache: branch + open PR (via gh) — fetched lazily on the
-  // first permission event after a 30s idle window. Cache is keyed by cwd
-  // (in practice always `worktree`) and shared across all permission
-  // events for the lifetime of the plugin.
+  // Live repo-context cache: branch + open PR (via gh) — refreshed on a
+  // short TTL so the classifier always has an up-to-date view of where
+  // the agent thinks it is. Keyed by cwd (in practice always `worktree`).
   const repoContextCache = new RepoContextCache({
     $: $ as unknown as BunShellLike,
+  })
+
+  // Session-pinned repo context: captured exactly once (lazily on the
+  // first permission event) and frozen for the lifetime of the plugin
+  // process. Compared against the live `repoContextCache` so the
+  // classifier can detect when the agent has moved off the human's
+  // pre-committed branch/PR.
+  const sessionRepoContext = new SessionRepoContext({
+    worktree,
+    fetcher: (cwd) => fetchRepoContext($ as unknown as BunShellLike, cwd),
   })
 
   // Track whether we've already logged a "repo context unavailable" line
   // so we don't spam the log on every permission event when gh is missing.
   let loggedRepoContextUnavailable = false
 
-  async function getRepoContext(): Promise<RepoContext | null> {
-    const ctx = await repoContextCache.get(worktree)
-    if (ctx === null && !loggedRepoContextUnavailable) {
+  async function getRepoContext(): Promise<DualRepoContext | null> {
+    const [pinned, current] = await Promise.all([
+      sessionRepoContext.getPinned(),
+      repoContextCache.get(worktree),
+    ])
+    if (
+      pinned === null &&
+      current === null &&
+      !loggedRepoContextUnavailable
+    ) {
       log.info("repo context unavailable", { worktree })
       loggedRepoContextUnavailable = true
     }
-    return ctx
+    return { pinned, current }
   }
 
   // Config is resolved at factory time from the per-plugin tuple options.
