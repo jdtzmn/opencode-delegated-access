@@ -171,6 +171,13 @@ REASON: <one short sentence>`
  * `/Users/jacob/Documents/GitHub/premind/*`). The structural injection
  * defence (XML delimiters + system-prompt instruction) mirrors the bash
  * variant.
+ *
+ * `repoContext` accepts both single-shape `RepoContext` and the wider
+ * `DualRepoContext` purely to satisfy `classifySubject`'s callback
+ * contravariance — but if given a dual context, this builder renders
+ * only the `.current` slice. The directory classifier's system prompt
+ * does NOT implement PR-scoped elevated trust, so the pinned slice is
+ * intentionally dropped.
  */
 export function buildDirectoryClassifierUserPrompt(args: {
   subject: string
@@ -187,9 +194,9 @@ export function buildDirectoryClassifierUserPrompt(args: {
   // DualRepoContext to its `current` slice so the rendered block stays
   // single-shape regardless of what the caller hands us.
   const repoForRender =
-    repoContext && typeof repoContext === "object" && "pinned" in repoContext && "current" in repoContext
-      ? (repoContext as DualRepoContext).current
-      : (repoContext as RepoContext | null | undefined) ?? null
+    repoContext && isDual(repoContext)
+      ? repoContext.current
+      : repoContext ?? null
   const repoBlock = renderRepoContext(repoForRender)
   const repoSection = repoBlock ? `${repoBlock}\n\n` : ""
 
