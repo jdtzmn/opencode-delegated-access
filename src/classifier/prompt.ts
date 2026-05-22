@@ -32,7 +32,7 @@ RISKY examples:
   - Accessing credentials or secrets (cat .env, reading private keys, git config credential.*)
   - Modifying shell or system config (~/.bashrc, ~/.zshrc, launchd plists, /etc/*)
   - Installing packages from arbitrary URLs or scripts
-  - Commands targeting a PR number that is NOT the open PR for the current branch (when <repo_context> is supplied)
+  - Commands targeting a PR number that does NOT match the pinned PR for the session AND does not match the current branch's open PR (when <repo_context> is supplied — see "Using <repo_context>" below for the precise rule)
   - Anything the human user has CLEARLY not asked for
 
 SAFE examples:
@@ -175,7 +175,7 @@ REASON: <one short sentence>`
 export function buildDirectoryClassifierUserPrompt(args: {
   subject: string
   userMessages: string[]
-  repoContext?: DualRepoContext | RepoContext | null
+  repoContext?: RepoContext | null
   priorApprovals?: ApprovalEntry[]
 }): string {
   const { subject, userMessages, repoContext, priorApprovals } = args

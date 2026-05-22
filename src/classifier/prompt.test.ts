@@ -554,6 +554,31 @@ describe("buildClassifierUserPrompt (dual repo context)", () => {
     expect(prompt).toContain(`current_open_pr_title: ${tricky}`)
   })
 
+  it("renders divergent session_* and current_* when branches/PRs differ", () => {
+    const dual: DualRepoContext = {
+      pinned: {
+        branch: "feat/x",
+        openPR: { number: 7, title: "Pinned PR", baseBranch: "main" },
+      },
+      current: {
+        branch: "main",
+        openPR: undefined,
+      },
+    }
+    const prompt = buildClassifierUserPrompt({
+      command: "gh pr comment 7 -b 'reply'",
+      userMessages: [],
+      repoContext: dual,
+    })
+    // Both sides must be present and clearly distinct so the classifier
+    // can detect drift: pinned has a PR, current has none and a different
+    // branch.
+    expect(prompt).toMatch(/session_branch: feat\/x/)
+    expect(prompt).toMatch(/session_open_pr_number: 7/)
+    expect(prompt).toMatch(/current_branch: main/)
+    expect(prompt).toMatch(/current_open_pr: none/)
+  })
+
   it("still accepts a legacy single-shape RepoContext for backwards compatibility", () => {
     // The old call-site shape (single RepoContext) continues to render
     // under legacy keys, so existing tests don't have to be rewritten.
