@@ -36,6 +36,8 @@ import { runRiskyPathInBackground } from "./risky-path.ts"
 import { handlePermissionEvent } from "./handler.ts"
 import { DirectoryVerdictCache } from "./directory-cache.ts"
 import { SafePathBatcher } from "./safe-path-batcher.ts"
+import { ApprovalHistoryStore } from "./approval-history.ts"
+import { PendingSubjectsMap } from "./pending-subjects.ts"
 import { DEFAULT_CONFIG } from "../config.ts"
 
 const mockedClassify = vi.mocked(classifyCommand)
@@ -94,6 +96,10 @@ function buildCtx(overrides: Partial<{
   sessionModel: { providerID: string; modelID: string } | undefined
   respondImpl: (opts: unknown) => Promise<unknown>
   getRepoContext: () => Promise<unknown> | unknown
+  approvalHistory: ApprovalHistoryStore
+  pendingSubjects: PendingSubjectsMap
+  approvalHistoryEnabled: boolean
+  approvalHistoryMax: number
 }> = {}) {
   const respondCall = vi.fn(
     overrides.respondImpl ?? (async () => ({ data: true } as unknown)),
@@ -117,6 +123,12 @@ function buildCtx(overrides: Partial<{
       ...(overrides.classifierModel !== undefined
         ? { classifierModel: overrides.classifierModel }
         : {}),
+      ...(overrides.approvalHistoryEnabled !== undefined
+        ? { approvalHistoryEnabled: overrides.approvalHistoryEnabled }
+        : {}),
+      ...(overrides.approvalHistoryMax !== undefined
+        ? { approvalHistoryMax: overrides.approvalHistoryMax }
+        : {}),
     },
     sessionModel:
       "sessionModel" in overrides
@@ -124,6 +136,8 @@ function buildCtx(overrides: Partial<{
         : { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
     ephemeralSessionIDs: new Set<string>(),
     directoryVerdictCache: new DirectoryVerdictCache(),
+    approvalHistory: overrides.approvalHistory ?? new ApprovalHistoryStore(),
+    pendingSubjects: overrides.pendingSubjects ?? new PendingSubjectsMap(),
     safePathBatcher: new SafePathBatcher({
       batchWindowMs: 0, // flush immediately in tests (runSafePath is mocked anyway)
       sendNotification: async () => ({ type: "timeout" as const }),
@@ -1019,5 +1033,179 @@ describe("handlePermissionEvent (external_directory)", () => {
     const { ctx, respondCall } = buildCtx()
     await handlePermissionEvent(dirPermission(), ctx)
     expect(respondCall).not.toHaveBeenCalled()
+  })
+})
+
+describe("approval history wiring", () => {
+  it("seeds a pending subject when a bash permission first fires", async () => {
+    const pending = new PendingSubjectsMap()
+    mockedClassify.mockResolvedValue({ verdict: "RISKY", reason: "test" })
+    mockedSafe.mockResolvedValue("ask")
+    const { ctx } = buildCtx({ pendingSubjects: pending })
+
+    await handlePermissionEvent(
+      {
+        id: "perm_1",
+        sessionID: "sess_test",
+        type: "bash",
+        pattern: ["ls -la"],
+      } as unknown as Parameters<typeof handlePermissionEvent>[0],
+      ctx,
+    )
+
+    const taken = pending.take("perm_1")
+    expect(taken).not.toBeNull()
+    expect(taken?.subject).toBe("ls -la")
+    expect(taken?.subjectLabel).toBe("command")
+    expect(taken?.classifierVerdict).toBe("RISKY")
+  })
+
+  it("seeds with subjectLabel='path' for external_directory permissions", async () => {
+    const pending = new PendingSubjectsMap()
+    mockedClassifySubject.mockResolvedValue({
+      verdict: "RISKY",
+      reason: "no context",
+    })
+    const { ctx } = buildCtx({ pendingSubjects: pending })
+
+    await handlePermissionEvent(
+      {
+        id: "perm_dir",
+        sessionID: "sess_test",
+        type: "external_directory",
+        pattern: ["/Users/jacob/Documents/GitHub/other/*"],
+      } as unknown as Parameters<typeof handlePermissionEvent>[0],
+      ctx,
+    )
+
+    const taken = pending.take("perm_dir")
+    expect(taken?.subjectLabel).toBe("path")
+  })
+
+  it("marks the pending subject autoApproved when SAFE path resolves to allow", async () => {
+    const pending = new PendingSubjectsMap()
+    mockedClassify.mockResolvedValue({ verdict: "SAFE", reason: "read-only" })
+    mockedSafe.mockResolvedValue("allow")
+    const { ctx } = buildCtx({ pendingSubjects: pending })
+
+    await handlePermissionEvent(
+      {
+        id: "perm_2",
+        sessionID: "sess_test",
+        type: "bash",
+        pattern: ["git status"],
+      } as unknown as Parameters<typeof handlePermissionEvent>[0],
+      ctx,
+    )
+
+    const taken = pending.take("perm_2")
+    expect(taken?.autoApproved).toBe(true)
+  })
+
+  it("does NOT mark autoApproved when SAFE path resolves to ask (user cancelled)", async () => {
+    const pending = new PendingSubjectsMap()
+    mockedClassify.mockResolvedValue({ verdict: "SAFE", reason: "read-only" })
+    mockedSafe.mockResolvedValue("ask")
+    const { ctx } = buildCtx({ pendingSubjects: pending })
+
+    await handlePermissionEvent(
+      {
+        id: "perm_3",
+        sessionID: "sess_test",
+        type: "bash",
+        pattern: ["git status"],
+      } as unknown as Parameters<typeof handlePermissionEvent>[0],
+      ctx,
+    )
+
+    const taken = pending.take("perm_3")
+    expect(taken?.autoApproved).toBe(false)
+  })
+
+  it("passes priorApprovals from the store into classifyCommand", async () => {
+    const history = new ApprovalHistoryStore()
+    history.record("sess_test", {
+      subject: "gh pr comment 1 -b 'a'",
+      subjectLabel: "command",
+      response: "once",
+      classifierVerdict: "RISKY",
+      classifierReason: "PR not matched",
+      timestamp: 1_000,
+    })
+    mockedClassify.mockResolvedValue({ verdict: "SAFE", reason: "stub" })
+    mockedSafe.mockResolvedValue("allow")
+    const { ctx } = buildCtx({ approvalHistory: history })
+
+    await handlePermissionEvent(
+      {
+        id: "perm_4",
+        sessionID: "sess_test",
+        type: "bash",
+        pattern: ["gh pr comment 1 -b 'b'"],
+      } as unknown as Parameters<typeof handlePermissionEvent>[0],
+      ctx,
+    )
+
+    expect(mockedClassify).toHaveBeenCalledTimes(1)
+    const callArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(callArgs?.priorApprovals?.length).toBe(1)
+    expect(callArgs?.priorApprovals?.[0]?.subject).toBe(
+      "gh pr comment 1 -b 'a'",
+    )
+  })
+
+  it("passes empty priorApprovals when approvalHistoryEnabled is false", async () => {
+    const history = new ApprovalHistoryStore()
+    history.record("sess_test", {
+      subject: "ls",
+      subjectLabel: "command",
+      response: "once",
+      classifierVerdict: "SAFE",
+      classifierReason: "x",
+      timestamp: 1_000,
+    })
+    mockedClassify.mockResolvedValue({ verdict: "SAFE", reason: "stub" })
+    mockedSafe.mockResolvedValue("allow")
+    const { ctx } = buildCtx({
+      approvalHistory: history,
+      approvalHistoryEnabled: false,
+    })
+
+    await handlePermissionEvent(
+      {
+        id: "perm_5",
+        sessionID: "sess_test",
+        type: "bash",
+        pattern: ["ls"],
+      } as unknown as Parameters<typeof handlePermissionEvent>[0],
+      ctx,
+    )
+
+    const callArgs = mockedClassify.mock.calls[0]?.[0]
+    expect(callArgs?.priorApprovals).toEqual([])
+  })
+
+  it("updates the pending subject's verdict after the classifier returns", async () => {
+    const pending = new PendingSubjectsMap()
+    mockedClassify.mockResolvedValue({
+      verdict: "SAFE",
+      reason: "looks fine",
+    })
+    mockedSafe.mockResolvedValue("ask")
+    const { ctx } = buildCtx({ pendingSubjects: pending })
+
+    await handlePermissionEvent(
+      {
+        id: "perm_6",
+        sessionID: "sess_test",
+        type: "bash",
+        pattern: ["ls"],
+      } as unknown as Parameters<typeof handlePermissionEvent>[0],
+      ctx,
+    )
+
+    const taken = pending.take("perm_6")
+    expect(taken?.classifierVerdict).toBe("SAFE")
+    expect(taken?.classifierReason).toBe("looks fine")
   })
 })

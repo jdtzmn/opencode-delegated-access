@@ -8,6 +8,8 @@ import {
 } from "./permission/handler.ts"
 import { DirectoryVerdictCache } from "./permission/directory-cache.ts"
 import { SafePathBatcher } from "./permission/safe-path-batcher.ts"
+import { ApprovalHistoryStore } from "./permission/approval-history.ts"
+import { PendingSubjectsMap } from "./permission/pending-subjects.ts"
 import { sendNotification } from "./notify/notify.ts"
 import type { ModelRef } from "./classifier/model.ts"
 import { createLogger, type Logger } from "./log.ts"
@@ -126,6 +128,17 @@ const DelegatedAccess: Plugin = async (
   // rapid-fire permission events on the same session.
   const directoryVerdictCache = new DirectoryVerdictCache()
 
+  // Per-plugin-lifetime store of recent human approval/rejection decisions
+  // scoped by root session ID. Surfaced to the classifier as prior-decision
+  // evidence; written by the `permission.replied` event handler when the
+  // human actually resolves a permission.
+  const approvalHistory = new ApprovalHistoryStore()
+
+  // Short-lived map of `permissionID → { rootSessionID, subject, ... }` that
+  // bridges the gap between rich subject info seen at permission-fire time
+  // and the bare permissionID carried by `permission.replied` events.
+  const pendingSubjects = new PendingSubjectsMap()
+
   // Shared batcher for SAFE-path notifications. A single instance means all
   // concurrent permission events funnel through the same 200ms batch window,
   // so bursts (e.g. agent accessing 3 sub-directories at once) produce one
@@ -173,6 +186,8 @@ const DelegatedAccess: Plugin = async (
       sessionModel,
       ephemeralSessionIDs,
       directoryVerdictCache,
+      approvalHistory,
+      pendingSubjects,
       safePathBatcher,
       log,
       getRepoContext,

@@ -17,6 +17,8 @@ import {
   buildDirectoryClassifierUserPrompt,
 } from "../classifier/prompt.ts"
 import { DirectoryVerdictCache } from "./directory-cache.ts"
+import { ApprovalHistoryStore } from "./approval-history.ts"
+import { PendingSubjectsMap } from "./pending-subjects.ts"
 import { runSafePath } from "./safe-path.ts"
 import type { SafePathBatcher } from "./safe-path-batcher.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
@@ -60,6 +62,22 @@ export type HandlerContext = {
    * permission events so burst requests for the same path skip the LLM call.
    */
   directoryVerdictCache: DirectoryVerdictCache
+  /**
+   * Per-plugin-lifetime store of recent human approval/rejection decisions
+   * scoped by root session ID. Read by the handler before classification
+   * (to surface priors to the classifier) and written by the
+   * `permission.replied` event handler in `index.ts` when the human
+   * actually resolves a permission.
+   */
+  approvalHistory: ApprovalHistoryStore
+  /**
+   * Short-lived map of `permissionID → { rootSessionID, subject, ... }`
+   * populated when a permission first fires and drained when the
+   * matching `permission.replied` event arrives. Bridges the gap between
+   * the rich subject info the handler sees and the bare permissionID the
+   * replied event carries.
+   */
+  pendingSubjects: PendingSubjectsMap
   /**
    * Shared batcher for SAFE-path notifications. Coalesces concurrent
    * notifications (e.g. burst external_directory requests) into a single
@@ -233,32 +251,6 @@ async function handleSubjectPermission(args: {
   } = args
   const { log } = ctx
 
-  // ---- Directory cache lookup (directories only) -------------------------
-  if (directoryPatterns) {
-    const cacheKey = DirectoryVerdictCache.keyFor(directoryPatterns)
-    const cached = ctx.directoryVerdictCache.get(cacheKey)
-    if (cached) {
-      log.info("directory cache hit — skipping classifier", {
-        ...base,
-        [subjectLabel]: subject,
-        cachedVerdict: cached.verdict.verdict,
-        cachedReason: cached.verdict.reason,
-      })
-      // Run safe-path with the cached verdict (burst requests still get the
-      // countdown; user can cancel any of them).
-      await runSafeOrRiskyPath({
-        verdict: cached.verdict,
-        subject,
-        subjectLabel,
-        permission,
-        ctx,
-        output,
-        base,
-      })
-      return
-    }
-  }
-
   // ---- Root-session resolution -------------------------------------------
   //
   // When a permission fires inside a subagent session, the sessionID points
@@ -283,6 +275,55 @@ async function handleSubjectPermission(args: {
       permissionSessionID: permission.sessionID,
       rootSessionID,
     })
+  }
+
+  // ---- Seed pending-subject map ------------------------------------------
+  //
+  // We seed BEFORE the directory-cache lookup so that on a cache hit (which
+  // skips the classifier) the replied-event handler can still match the
+  // permissionID back to its subject text. The classifier-verdict fields
+  // are filled in later (after classification) and the autoApproved flag
+  // is set inside `runSafeOrRiskyPath` when we resolve a SAFE verdict.
+  ctx.pendingSubjects.set(permission.id, {
+    rootSessionID,
+    subject,
+    subjectLabel: subjectLabel === "path" ? "path" : "command",
+    classifierVerdict: null,
+    classifierReason: null,
+    autoApproved: false,
+  })
+
+  // ---- Directory cache lookup (directories only) -------------------------
+  if (directoryPatterns) {
+    const cacheKey = DirectoryVerdictCache.keyFor(directoryPatterns)
+    const cached = ctx.directoryVerdictCache.get(cacheKey)
+    if (cached) {
+      log.info("directory cache hit — skipping classifier", {
+        ...base,
+        [subjectLabel]: subject,
+        cachedVerdict: cached.verdict.verdict,
+        cachedReason: cached.verdict.reason,
+      })
+      // Update the pending entry with the cached verdict so the replied
+      // handler has a verdict to record (even on the cache-hit path).
+      ctx.pendingSubjects.update(permission.id, (cur) => ({
+        ...cur,
+        classifierVerdict: cached.verdict.verdict,
+        classifierReason: cached.verdict.reason,
+      }))
+      // Run safe-path with the cached verdict (burst requests still get the
+      // countdown; user can cancel any of them).
+      await runSafeOrRiskyPath({
+        verdict: cached.verdict,
+        subject,
+        subjectLabel,
+        permission,
+        ctx,
+        output,
+        base,
+      })
+      return
+    }
   }
 
   // ---- Message extraction ------------------------------------------------
@@ -335,6 +376,15 @@ async function handleSubjectPermission(args: {
         ? "latestAssistantMessage"
         : "unknown"
 
+  // ---- Prior approvals ---------------------------------------------------
+  //
+  // Read recent in-session human decisions and surface them to the
+  // classifier as prior-decision evidence. When disabled by config, pass
+  // an empty array so the classifier prompt omits the block entirely.
+  const priorApprovals = ctx.config.approvalHistoryEnabled
+    ? ctx.approvalHistory.recent(rootSessionID, ctx.config.approvalHistoryMax)
+    : []
+
   // Best-effort fetch of repo context (branch + open PR). Cached upstream
   // with a short TTL so back-to-back permissions don't all re-fetch.
   let repoContext: RepoContext | null = null
@@ -355,6 +405,7 @@ async function handleSubjectPermission(args: {
     modelSource,
     repoBranch: repoContext?.branch ?? null,
     repoOpenPR: repoContext?.openPR?.number ?? null,
+    priorApprovalCount: priorApprovals.length,
   })
 
   // ---- Classifier call ---------------------------------------------------
@@ -365,6 +416,7 @@ async function handleSubjectPermission(args: {
     model,
     timeoutMs: ctx.config.classifierTimeoutMs,
     repoContext,
+    priorApprovals,
     onEphemeralSessionCreated: (id: string) =>
       ctx.ephemeralSessionIDs.add(id),
     onEphemeralSessionDeleted: (id: string) =>
@@ -393,6 +445,13 @@ async function handleSubjectPermission(args: {
     verdict: verdict.verdict,
     reason: verdict.reason,
   })
+
+  // ---- Update pending subject with the verdict ---------------------------
+  ctx.pendingSubjects.update(permission.id, (cur) => ({
+    ...cur,
+    classifierVerdict: verdict.verdict,
+    classifierReason: verdict.reason,
+  }))
 
   // ---- Directory cache population (SAFE only) ----------------------------
   if (directoryPatterns && verdict.verdict === "SAFE") {
@@ -452,6 +511,14 @@ async function runSafeOrRiskyPath(args: {
         [subjectLabel]: subject,
         viaOutput: Boolean(output),
       })
+      // Tag the pending entry BEFORE the respond/output call so that even
+      // if the server emits `permission.replied` immediately after, the
+      // replied-event handler sees `autoApproved: true` and filters this
+      // out of the human-decision history.
+      ctx.pendingSubjects.update(permission.id, (cur) => ({
+        ...cur,
+        autoApproved: true,
+      }))
       if (output) {
         output.status = "allow"
       } else {
