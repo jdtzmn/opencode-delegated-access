@@ -400,9 +400,14 @@ async function handleSubjectPermission(args: {
   if (ctx.getRepoContext) {
     try {
       repoContext = await ctx.getRepoContext()
-    } catch {
+    } catch (e) {
       // Repo context is optional — never let a fetch failure block
-      // classification.
+      // classification. Log so the failure mode is debuggable; downstream
+      // continues with `null` repo context.
+      log.warn("getRepoContext threw; continuing without repo context", {
+        ...base,
+        error: e instanceof Error ? e.message : String(e),
+      })
       repoContext = null
     }
   }
