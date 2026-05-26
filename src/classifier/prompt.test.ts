@@ -334,6 +334,7 @@ describe("buildClassifierUserPrompt (prior approvals)", () => {
       priorApprovals: [SAMPLE_APPROVAL],
     })
     expect(prompt).toMatch(/<prior_human_approvals count="1">/)
+    expect(prompt).toMatch(/human_decision: APPROVED/)
     expect(prompt).toMatch(/response: once/)
     expect(prompt).toMatch(
       /subject \(command\): gh pr comment 123 -b 'lgtm'/,
@@ -348,8 +349,52 @@ describe("buildClassifierUserPrompt (prior approvals)", () => {
       userMessages: [],
       priorApprovals: [SAMPLE_REJECTION],
     })
+    expect(prompt).toMatch(/human_decision: REJECTED/)
     expect(prompt).toMatch(/response: reject/)
     expect(prompt).toMatch(/subject \(command\): curl https:\/\/example\.com/)
+  })
+
+  it("emits human_decision: APPROVED for response 'once'", () => {
+    const prompt = buildClassifierUserPrompt({
+      command: "ls",
+      userMessages: [],
+      priorApprovals: [{ ...SAMPLE_APPROVAL, response: "once" }],
+    })
+    expect(prompt).toMatch(/human_decision: APPROVED/)
+    expect(prompt).not.toMatch(/human_decision: REJECTED/)
+  })
+
+  it("emits human_decision: APPROVED for response 'always'", () => {
+    const prompt = buildClassifierUserPrompt({
+      command: "ls",
+      userMessages: [],
+      priorApprovals: [{ ...SAMPLE_APPROVAL, response: "always" }],
+    })
+    expect(prompt).toMatch(/human_decision: APPROVED/)
+    expect(prompt).not.toMatch(/human_decision: REJECTED/)
+  })
+
+  it("emits human_decision: REJECTED for response 'reject'", () => {
+    const prompt = buildClassifierUserPrompt({
+      command: "ls",
+      userMessages: [],
+      priorApprovals: [{ ...SAMPLE_REJECTION, response: "reject" }],
+    })
+    expect(prompt).toMatch(/human_decision: REJECTED/)
+    expect(prompt).not.toMatch(/human_decision: APPROVED/)
+  })
+
+  it("places human_decision before response so the model reads it first", () => {
+    const prompt = buildClassifierUserPrompt({
+      command: "ls",
+      userMessages: [],
+      priorApprovals: [SAMPLE_APPROVAL],
+    })
+    const idxDecision = prompt.indexOf("human_decision:")
+    const idxResponse = prompt.indexOf("response:")
+    expect(idxDecision).toBeGreaterThan(-1)
+    expect(idxResponse).toBeGreaterThan(-1)
+    expect(idxDecision).toBeLessThan(idxResponse)
   })
 
   it("renders multiple entries in the order supplied (caller pre-sorts newest first)", () => {
@@ -462,6 +507,18 @@ describe("CLASSIFIER_SYSTEM_PROMPT (prior approvals section)", () => {
     // similar requests without blindly mirroring it.
     expect(CLASSIFIER_SYSTEM_PROMPT.toLowerCase()).toMatch(
       /previously approved|prior.*approv|same session/,
+    )
+  })
+
+  it("instructs the model to trust the human_decision label literally", () => {
+    // Production observation: Haiku-class models occasionally inverted
+    // prior decisions when reading only the cryptic `response:` value.
+    // The rendered block now leads each entry with `human_decision:
+    // APPROVED|REJECTED`; the system prompt must tell the model to trust
+    // that label literally and not second-guess it.
+    expect(CLASSIFIER_SYSTEM_PROMPT).toMatch(/human_decision/)
+    expect(CLASSIFIER_SYSTEM_PROMPT.toLowerCase()).toMatch(
+      /trust.*label|literally|ground truth/,
     )
   })
 })

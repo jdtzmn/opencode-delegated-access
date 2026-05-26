@@ -57,8 +57,9 @@ Using <repo_context> for PR-scoped elevated trust:
   - When <repo_context> is absent or both sides are null, classify as if the block were not present.
 
 Using <prior_human_approvals>:
-  - If a recent entry shows the human APPROVED ("response: once" or "response: always") a subject very similar to the current one in this same session, you may lean SAFE for the current one — treat it as evidence the human has already endorsed this category of action.
-  - If a recent entry shows the human REJECTED ("response: reject") a similar subject, lean RISKY — they've already expressed an objection in-session.
+  - Each entry begins with a "human_decision:" line whose value is either APPROVED or REJECTED. Trust that label literally — it is the ground truth of what the human did. Do NOT second-guess it from the raw "response:" value below it.
+  - If a recent entry has human_decision: APPROVED and its subject is very similar to the current command, lean SAFE for the current one — the human has already endorsed this category of action in this session.
+  - If a recent entry has human_decision: REJECTED and its subject is very similar to the current command, lean RISKY — the human has already objected to this category in-session.
   - Similarity should be judged on intent and target, not exact string match: 'gh pr comment 123 -b "a"' and 'gh pr comment 123 -b "b"' are very similar; 'rm -rf /tmp/x' and 'rm -rf /Users/jacob' are not.
   - Do NOT use prior approvals to override the hard RISKY categories above (destructive, privilege escalation, credential access, etc.). Those stay RISKY regardless of prior decisions.
   - No prior approvals = no extra evidence either way; fall back to your normal judgment.
@@ -279,17 +280,27 @@ function sideLines(prefix: "session" | "current", repo: RepoContext): string[] {
  * string when no entries are available. Caller is expected to have
  * pre-sorted the list newest-first.
  *
- * Each entry is rendered on its own line group with `response:`,
- * `subject (label):`, `classifier_said:`, and `classifier_reason:` keys
- * so the model gets clear, parseable evidence rather than free-form
- * prose. Format mirrors the data-block style used by <repo_context> for
- * consistency. Field values are whitespace-flattened so embedded newlines
- * can't break the key:value layout.
+ * Each entry leads with a self-describing `human_decision:` line
+ * (APPROVED / REJECTED) so a small classifier model can't miss the
+ * mapping between the cryptic `response:` value and what it actually
+ * means. The raw `response:` value is kept below for completeness. The
+ * remaining fields (`subject (label):`, `classifier_said:`,
+ * `classifier_reason:`) carry the evidence. Format mirrors the data-
+ * block style used by <repo_context> for consistency. Field values are
+ * whitespace-flattened so embedded newlines can't break the key:value
+ * layout.
+ *
+ * Why the self-describing line: observed in production that
+ * Haiku-class models occasionally invert a prior decision when reading
+ * only the `response:` key, despite the system prompt explicitly
+ * mapping "once"/"always" to APPROVED and "reject" to REJECTED. Leading
+ * with the plain-English label removes the inference step.
  */
 function renderPriorApprovals(entries: ApprovalEntry[]): string {
   if (entries.length === 0) return ""
   const blocks = entries.map((e) => {
     return [
+      `human_decision: ${humanDecisionLabel(e.response)}`,
       `response: ${flattenWhitespace(e.response)}`,
       `subject (${e.subjectLabel}): ${flattenWhitespace(e.subject)}`,
       `classifier_said: ${flattenWhitespace(e.classifierVerdict)}`,
@@ -297,6 +308,18 @@ function renderPriorApprovals(entries: ApprovalEntry[]): string {
     ].join("\n")
   })
   return `<prior_human_approvals count="${entries.length}">\n${blocks.join("\n---\n")}\n</prior_human_approvals>`
+}
+
+/**
+ * Map a raw permission response to a plain-English label the classifier
+ * can't misread. Unknown values fall back to the raw value (defensive —
+ * the response is filtered to "once"|"always"|"reject" before storage,
+ * but we keep this open in case of future opencode response values).
+ */
+function humanDecisionLabel(response: string): string {
+  if (response === "once" || response === "always") return "APPROVED"
+  if (response === "reject") return "REJECTED"
+  return response
 }
 
 function flattenWhitespace(s: string): string {
