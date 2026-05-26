@@ -165,6 +165,24 @@ The desktop notifications with Approve / Reject buttons work via `terminal-notif
 - **The classifier can't trigger itself.** We track ephemeral classifier sessions and ignore permission events from them.
 - **The directory cache only speeds things up; it can't change a RISKY verdict.** Only SAFE verdicts are cached. A RISKY verdict for any path always triggers the escalation notification — the cache only deduplicates rapid burst requests for a path that was already classified SAFE.
 - **Repo context is best-effort and gracefully optional.** Branch is read with `git`; the open-PR lookup uses `gh`. If `gh` isn't installed, isn't authenticated, or the working directory isn't a git repo, the classifier just runs without that context — never blocks. The PR title is rendered inside `<repo_context>` delimiters and treated as data (not instructions) by the classifier.
+- **The session pin can't be moved by the agent.** PR-scoped elevated trust depends on a snapshot captured exactly once at plugin startup. There is no API to refresh, reset, or invalidate it for the lifetime of the OpenCode process — the agent can't `git checkout` its way into a different trust scope.
+
+## PR-scoped elevated trust
+
+When you launch OpenCode inside a git checkout that has an open PR, Delegated Access takes a single snapshot of the current branch + PR number + PR title and freezes it for the lifetime of the OpenCode process. That pinned snapshot is shown to the classifier alongside the live branch/PR view in every classification.
+
+The classifier uses the two views together:
+
+- **When the pinned snapshot and the live view match** (same branch, same PR number), commands whose obvious purpose is to advance that pinned PR — `gh pr comment N`, `gh pr review N`, `gh pr checks N`, `gh pr view N`, `gh pr diff N`, non-force `git push origin <pinned-branch>` — get the benefit of the doubt that they would otherwise need an explicit recent-user-message endorsement for.
+- **When they don't match** (the agent has checked out a different branch, ended up in a different repo, or the PR has merged/closed mid-session), PR-scoped elevated trust is withdrawn. All PR-targeting commands fall back to the normal classification rules.
+
+A few important properties:
+
+- **The pin is captured once and never refreshed.** This is the load-bearing security property. If the snapshot could be refreshed mid-session, an agent could `git checkout` to a different branch and have the trust window follow it. The pin is therefore deliberately immutable for the plugin's lifetime — close OpenCode and re-launch to re-pin.
+- **Hard-RISKY categories still escalate.** A pinned PR doesn't override destructive `rm`, sudo, credential reads, force pushes, branch deletion, repo settings changes, or merging the PR itself. Those stay RISKY no matter what.
+- **Cross-repo targeting stays RISKY.** A command like `gh pr comment 7 --repo other-org/other-repo` does not match the pin even if the PR number is the same; the classifier treats different-repo targeting as out-of-scope.
+- **No PR pinned = no elevated trust.** If you launch OpenCode in a directory that isn't a git checkout, or in a checkout with no open PR, the feature is a no-op: classification proceeds exactly as before.
+- **No new config knob.** This composes with the existing `<repo_context>` mechanism. If you want to disable it, set your branch's PR to closed before launching.
 
 ## Session approval history
 
@@ -180,7 +198,7 @@ A few important properties of how this works:
 
 ## Status
 
-v0.3.0. Bash commands and external directory access, with per-session approval history that lets the classifier learn from your prior in-session decisions. Edit / write / webfetch still prompt normally — those are out of scope. TypeScript, Bun. macOS-tested; Linux/Windows should work with degraded notification interactivity.
+v0.4.0. Bash commands and external directory access, with per-session approval history that lets the classifier learn from your prior in-session decisions, plus PR-scoped elevated trust pinned at session start so the classifier knows which PR you actually committed to working on. Edit / write / webfetch still prompt normally — those are out of scope. TypeScript, Bun. macOS-tested; Linux/Windows should work with degraded notification interactivity.
 
 ## Development
 
