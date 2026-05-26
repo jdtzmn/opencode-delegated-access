@@ -21,6 +21,64 @@ import {
 import { SessionRepoContext } from "./session-repo-context.ts"
 
 /**
+ * Normalise the `properties` payload of a `permission.replied` event
+ * into the SDK-declared canonical shape `{ sessionID, permissionID,
+ * response }`.
+ *
+ * Why this exists: opencode 1.4.x's SDK type declarations claim the
+ * runtime emits `{ sessionID, permissionID, response }`, but the actual
+ * runtime emits `{ sessionID, requestID, reply }` — same SDK/runtime
+ * drift pattern we already handle for `permission.updated` permission
+ * shapes (see `src/permission/handler.ts`'s `runtimeShape` adapter).
+ * Without this normaliser, every TUI/notification approval was being
+ * silently dropped with a `permission.replied: malformed event
+ * properties` warning, and the entire approval-history capture path was
+ * a no-op in production.
+ *
+ * Returns `null` for inputs that can't be coerced to the canonical
+ * shape (missing sessionID, neither permissionID nor requestID, neither
+ * response nor reply, or non-object input). The caller should treat
+ * `null` as "malformed; log and skip."
+ *
+ * SDK keys win when both shapes are present, so that a future opencode
+ * release switching to the canonical shape doesn't get mis-routed if it
+ * also accidentally sets the legacy fields.
+ */
+export function normalizeRepliedProperties(
+  raw: unknown,
+): { sessionID: string; permissionID: string; response: string } | null {
+  if (!raw || typeof raw !== "object") return null
+
+  const r = raw as {
+    sessionID?: unknown
+    permissionID?: unknown
+    response?: unknown
+    requestID?: unknown
+    reply?: unknown
+  }
+
+  if (typeof r.sessionID !== "string") return null
+
+  const permissionID =
+    typeof r.permissionID === "string"
+      ? r.permissionID
+      : typeof r.requestID === "string"
+        ? r.requestID
+        : null
+  if (permissionID === null) return null
+
+  const response =
+    typeof r.response === "string"
+      ? r.response
+      : typeof r.reply === "string"
+        ? r.reply
+        : null
+  if (response === null) return null
+
+  return { sessionID: r.sessionID, permissionID, response }
+}
+
+/**
  * Pure handler for `permission.replied` events. Looks up the matching
  * pending subject (set by the permission.updated path), filters out our
  * own auto-approvals, and appends a human-decision entry to the
@@ -406,32 +464,19 @@ const DelegatedAccess: Plugin = async (
 
       if (type === "permission.replied") {
         const props = (event as { properties?: unknown }).properties
-        if (
-          !props ||
-          typeof props !== "object" ||
-          typeof (props as { sessionID?: unknown }).sessionID !== "string" ||
-          typeof (props as { permissionID?: unknown }).permissionID !==
-            "string" ||
-          typeof (props as { response?: unknown }).response !== "string"
-        ) {
+        const normalized = normalizeRepliedProperties(props)
+        if (normalized === null) {
           log.warn("permission.replied: malformed event properties", {
             properties: props,
           })
           return
         }
-        handlePermissionReplied(
-          props as {
-            sessionID: string
-            permissionID: string
-            response: string
-          },
-          {
-            pendingSubjects,
-            approvalHistory,
-            config,
-            log,
-          },
-        )
+        handlePermissionReplied(normalized, {
+          pendingSubjects,
+          approvalHistory,
+          config,
+          log,
+        })
         return
       }
 

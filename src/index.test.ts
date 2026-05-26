@@ -4,7 +4,10 @@ vi.mock("./permission/handler.ts", () => ({
   handlePermissionEvent: vi.fn(),
 }))
 
-import DelegatedAccess, { handlePermissionReplied } from "./index.ts"
+import DelegatedAccess, {
+  handlePermissionReplied,
+  normalizeRepliedProperties,
+} from "./index.ts"
 import { handlePermissionEvent } from "./permission/handler.ts"
 import { ApprovalHistoryStore } from "./permission/approval-history.ts"
 import { PendingSubjectsMap } from "./permission/pending-subjects.ts"
@@ -528,6 +531,139 @@ describe("event hook wiring for permission.replied", () => {
     } as never)
     expect(mockedHandle).not.toHaveBeenCalled()
     // No throw means the malformed-event guard worked.
+  })
+})
+
+describe("normalizeRepliedProperties", () => {
+  it("accepts the SDK-declared shape verbatim", () => {
+    expect(
+      normalizeRepliedProperties({
+        sessionID: "ses_1",
+        permissionID: "perm_1",
+        response: "once",
+      }),
+    ).toEqual({
+      sessionID: "ses_1",
+      permissionID: "perm_1",
+      response: "once",
+    })
+  })
+
+  it("normalises the runtime shape (requestID/reply) to the SDK shape", () => {
+    // OpenCode 1.4.x's runtime emits these field names rather than the
+    // SDK-typed permissionID/response. This is observed in production
+    // logs: properties={"sessionID":"…","requestID":"…","reply":"once"}.
+    expect(
+      normalizeRepliedProperties({
+        sessionID: "ses_1",
+        requestID: "perm_1",
+        reply: "once",
+      }),
+    ).toEqual({
+      sessionID: "ses_1",
+      permissionID: "perm_1",
+      response: "once",
+    })
+  })
+
+  it("prefers SDK keys when both shapes are present (canonical wins)", () => {
+    expect(
+      normalizeRepliedProperties({
+        sessionID: "ses_1",
+        permissionID: "perm_canonical",
+        response: "once",
+        requestID: "perm_runtime",
+        reply: "reject",
+      }),
+    ).toEqual({
+      sessionID: "ses_1",
+      permissionID: "perm_canonical",
+      response: "once",
+    })
+  })
+
+  it("returns null when sessionID is missing", () => {
+    expect(
+      normalizeRepliedProperties({
+        permissionID: "perm_1",
+        response: "once",
+      }),
+    ).toBeNull()
+  })
+
+  it("returns null when neither permissionID nor requestID is a string", () => {
+    expect(
+      normalizeRepliedProperties({
+        sessionID: "ses_1",
+        response: "once",
+      }),
+    ).toBeNull()
+  })
+
+  it("returns null when neither response nor reply is a string", () => {
+    expect(
+      normalizeRepliedProperties({
+        sessionID: "ses_1",
+        permissionID: "perm_1",
+      }),
+    ).toBeNull()
+  })
+
+  it("returns null for non-object inputs", () => {
+    expect(normalizeRepliedProperties(null)).toBeNull()
+    expect(normalizeRepliedProperties(undefined)).toBeNull()
+    expect(normalizeRepliedProperties("string")).toBeNull()
+    expect(normalizeRepliedProperties(42)).toBeNull()
+  })
+})
+
+describe("event hook wiring for permission.replied (runtime shape)", () => {
+  it("records a human approval when the event uses runtime field names (requestID/reply)", async () => {
+    // Reproduces the production bug: every permission.replied event we
+    // observed in opencode 1.4.x carries { sessionID, requestID, reply }
+    // rather than the SDK-declared { sessionID, permissionID, response }.
+    // Before this fix, the event-hook guard rejected them all as
+    // malformed and silently dropped every human approval.
+    const hooks = await makePluginHooks()
+    mockedHandle.mockClear()
+
+    // Seed a pending subject so the replied handler has something to record.
+    let capturedCtx: Parameters<typeof handlePermissionEvent>[1] | undefined
+    mockedHandle.mockImplementationOnce(async (_perm, ctx) => {
+      capturedCtx = ctx
+      ctx.pendingSubjects.set("perm_runtime_1", {
+        rootSessionID: "ses_test",
+        subject: "rm -rf /tmp/example",
+        subjectLabel: "command",
+        classifierVerdict: "RISKY",
+        classifierReason: "rm outside project",
+        autoApproved: false,
+      })
+    })
+
+    // Fire a permission.updated first so the ctx (and its stores) are
+    // captured for the test.
+    await hooks["permission.updated"]!(basePermission() as never)
+    expect(capturedCtx).toBeDefined()
+
+    // Now fire the runtime-shape permission.replied event.
+    await hooks["event"]!({
+      event: {
+        type: "permission.replied",
+        properties: {
+          sessionID: "ses_test",
+          requestID: "perm_runtime_1",
+          reply: "once",
+        },
+      },
+    } as never)
+
+    // The pending entry should have been taken (history recorded against
+    // the stored rootSessionID).
+    const entries = capturedCtx!.approvalHistory.recent("ses_test", 10)
+    expect(entries.length).toBe(1)
+    expect(entries[0]?.subject).toBe("rm -rf /tmp/example")
+    expect(entries[0]?.response).toBe("once")
   })
 })
 
