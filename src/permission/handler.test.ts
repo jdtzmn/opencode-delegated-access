@@ -27,12 +27,25 @@ vi.mock("./safe-path.ts", () => ({
 vi.mock("./risky-path.ts", () => ({
   runRiskyPathInBackground: vi.fn(),
 }))
+// Mock only the notification runner; keep the real FailureNotifyRateLimiter so
+// the handler's rate-limit wiring is exercised end-to-end.
+vi.mock("./failure-notify.ts", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return {
+    ...actual,
+    runFailureNotificationInBackground: vi.fn(async () => {}),
+  }
+})
 
 import { classifyCommand, classifySubject } from "../classifier/classify.ts"
 import { getSessionMessages, type MessageEntry } from "../ui/messages.ts"
 import { resolveRootSessionID } from "../ui/session-tree.ts"
 import { runSafePath } from "./safe-path.ts"
 import { runRiskyPathInBackground } from "./risky-path.ts"
+import {
+  runFailureNotificationInBackground,
+  FailureNotifyRateLimiter,
+} from "./failure-notify.ts"
 import { handlePermissionEvent } from "./handler.ts"
 import { DirectoryVerdictCache } from "./directory-cache.ts"
 import { SafePathBatcher } from "./safe-path-batcher.ts"
@@ -46,6 +59,7 @@ const mockedGetSessionMessages = vi.mocked(getSessionMessages)
 const mockedResolveRoot = vi.mocked(resolveRootSessionID)
 const mockedSafe = vi.mocked(runSafePath)
 const mockedRisky = vi.mocked(runRiskyPathInBackground)
+const mockedFailureNotify = vi.mocked(runFailureNotificationInBackground)
 
 /** Minimal synthetic entry helpers for handler tests. */
 function userEntry(text: string): MessageEntry {
@@ -100,6 +114,8 @@ function buildCtx(overrides: Partial<{
   pendingSubjects: PendingSubjectsMap
   approvalHistoryEnabled: boolean
   approvalHistoryMax: number
+  notifyOnClassifierFailure: boolean
+  failureNotifyRateLimiter: FailureNotifyRateLimiter
 }> = {}) {
   const respondCall = vi.fn(
     overrides.respondImpl ?? (async () => ({ data: true } as unknown)),
@@ -129,6 +145,9 @@ function buildCtx(overrides: Partial<{
       ...(overrides.approvalHistoryMax !== undefined
         ? { approvalHistoryMax: overrides.approvalHistoryMax }
         : {}),
+      ...(overrides.notifyOnClassifierFailure !== undefined
+        ? { notifyOnClassifierFailure: overrides.notifyOnClassifierFailure }
+        : {}),
     },
     sessionModel:
       "sessionModel" in overrides
@@ -144,6 +163,11 @@ function buildCtx(overrides: Partial<{
       countdownMs: DEFAULT_CONFIG.safeCountdownMs,
       sound: false,
     }),
+    failureNotifyRateLimiter:
+      overrides.failureNotifyRateLimiter ??
+      new FailureNotifyRateLimiter({
+        cooldownMs: DEFAULT_CONFIG.classifierFailureNotifyCooldownMs,
+      }),
     log,
     ...(overrides.getRepoContext !== undefined
       ? {
@@ -163,6 +187,8 @@ beforeEach(() => {
   mockedResolveRoot.mockReset()
   mockedSafe.mockReset()
   mockedRisky.mockReset()
+  mockedFailureNotify.mockReset()
+  mockedFailureNotify.mockResolvedValue(undefined)
   // Default: one user message, no assistant messages. Tests that need
   // assistant-model fallback override this with their own value.
   mockedGetSessionMessages.mockResolvedValue([
@@ -260,15 +286,64 @@ describe("handlePermissionEvent", () => {
     expect(args?.reason).toBe("destructive")
   })
 
-  it("does nothing when the classifier fails (returns null)", async () => {
+  it("does not auto-resolve when the classifier fails (returns null)", async () => {
     mockedClassify.mockResolvedValueOnce(null)
 
     const { ctx, respondCall } = buildCtx()
     await handlePermissionEvent(basePermission(), ctx)
 
+    // The plugin must never auto-approve/auto-reject on a classifier failure.
     expect(respondCall).not.toHaveBeenCalled()
     expect(mockedSafe).not.toHaveBeenCalled()
     expect(mockedRisky).not.toHaveBeenCalled()
+  })
+
+  it("fires the failure notification when the classifier returns null", async () => {
+    mockedClassify.mockResolvedValueOnce(null)
+
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(basePermission({ pattern: "echo hi" }), ctx)
+
+    expect(mockedFailureNotify).toHaveBeenCalledTimes(1)
+    const args = mockedFailureNotify.mock.calls[0]?.[0]
+    expect(args?.permissionID).toBe("perm_123")
+    expect(args?.command).toBe("echo hi")
+    // Failure class defaults to "error" when the classifier mock doesn't
+    // invoke onFailure; the real classifier reports "timeout" vs "error".
+    expect(["timeout", "error"]).toContain(args?.failureClass)
+  })
+
+  it("does NOT fire the failure notification when notifyOnClassifierFailure is false", async () => {
+    mockedClassify.mockResolvedValueOnce(null)
+
+    const { ctx } = buildCtx({ notifyOnClassifierFailure: false })
+    await handlePermissionEvent(basePermission(), ctx)
+
+    expect(mockedFailureNotify).not.toHaveBeenCalled()
+  })
+
+  it("does NOT fire the failure notification on a successful verdict", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(basePermission(), ctx)
+
+    expect(mockedFailureNotify).not.toHaveBeenCalled()
+  })
+
+  it("rate-limits a burst of failures into a single notification", async () => {
+    // Shared rate limiter with a long cooldown across multiple permissions.
+    const rl = new FailureNotifyRateLimiter({ cooldownMs: 60_000 })
+    mockedClassify.mockResolvedValue(null)
+
+    const { ctx } = buildCtx({ failureNotifyRateLimiter: rl })
+    await handlePermissionEvent(basePermission({ id: "p1" }), ctx)
+    await handlePermissionEvent(basePermission({ id: "p2" }), ctx)
+    await handlePermissionEvent(basePermission({ id: "p3" }), ctx)
+
+    // Only the first failure in the window actually notifies.
+    expect(mockedFailureNotify).toHaveBeenCalledTimes(1)
   })
 
   it("does nothing when getSessionMessages throws", async () => {

@@ -9,7 +9,12 @@ import {
 import {
   classifyCommand,
   classifySubject,
+  type ClassifyFailureClass,
 } from "../classifier/classify.ts"
+import {
+  runFailureNotificationInBackground,
+  FailureNotifyRateLimiter,
+} from "./failure-notify.ts"
 import { resolveClassifierModel, type ModelRef } from "../classifier/model.ts"
 import { resolveRootSessionID } from "../ui/session-tree.ts"
 import {
@@ -88,6 +93,12 @@ export type HandlerContext = {
    * macOS notification so they don't cancel each other out.
    */
   safePathBatcher: SafePathBatcher
+  /**
+   * Shared, plugin-lifetime rate limiter for classifier-failure
+   * notifications. Collapses a burst of failures (e.g. during a provider
+   * outage) into a single notification per cooldown window.
+   */
+  failureNotifyRateLimiter: FailureNotifyRateLimiter
   /** Logger for diagnostic output. */
   log: Logger
   /**
@@ -441,20 +452,40 @@ async function handleSubjectPermission(args: {
       ctx.ephemeralSessionIDs.delete(id),
   }
 
+  // Capture the FINAL failure class reported by the classifier (after any
+  // retries) so the failure-notification path can distinguish a transient
+  // timeout from a harder error. Defaults to "error" if the classifier
+  // returns null without reporting (shouldn't happen, but fail safe).
+  let failureClass: ClassifyFailureClass = "error"
+  const onFailure = (fc: ClassifyFailureClass) => {
+    failureClass = fc
+  }
+
   const verdict =
     systemPrompt === null
       ? // Bash path: use the convenience wrapper that supplies the bash prompt.
-        await classifyCommand({ ...commonClassifyArgs, command: subject })
+        await classifyCommand({ ...commonClassifyArgs, command: subject, onFailure })
       : // Generic path (e.g. directory): caller supplies the system prompt.
         await classifySubject({
           ...commonClassifyArgs,
           subject,
           systemPrompt,
           buildUserPrompt: buildDirectoryClassifierUserPrompt,
+          onFailure,
         })
 
   if (!verdict) {
-    log.warn("classifier failed; leaving TUI prompt alone", base)
+    log.warn("classifier failed; leaving TUI prompt alone", {
+      ...base,
+      failureClass,
+    })
+    maybeNotifyClassifierFailure({
+      ctx,
+      permission,
+      subject,
+      failureClass,
+      base,
+    })
     return
   }
 
@@ -490,6 +521,57 @@ async function handleSubjectPermission(args: {
     ctx,
     output,
     base,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Classifier-failure notification (rate-limited, Reject-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * On a classifier failure (after retries), optionally fire a rate-limited,
+ * informational + Reject-only desktop notification so the human gets insight
+ * that a transient error happened instead of a silent fall-through to the TUI
+ * prompt. Gated by `config.notifyOnClassifierFailure` and the shared
+ * `failureNotifyRateLimiter`. Fire-and-forget — never blocks the handler.
+ */
+function maybeNotifyClassifierFailure(args: {
+  ctx: HandlerContext
+  permission: Permission
+  subject: string
+  failureClass: ClassifyFailureClass
+  base: Record<string, unknown>
+}): void {
+  const { ctx, permission, subject, failureClass, base } = args
+  if (!ctx.config.notifyOnClassifierFailure) return
+
+  const decision = ctx.failureNotifyRateLimiter.register(
+    failureClass,
+    Date.now(),
+  )
+  if (!decision.notify) {
+    ctx.log.debug("classifier-failure notification suppressed (rate-limited)", {
+      ...base,
+      failureClass,
+    })
+    return
+  }
+
+  ctx.log.info("firing classifier-failure notification", {
+    ...base,
+    failureClass,
+    suppressedCount: decision.suppressedCount,
+  })
+
+  void runFailureNotificationInBackground({
+    client: ctx.client,
+    sessionID: permission.sessionID,
+    permissionID: permission.id,
+    command: subject,
+    failureClass,
+    suppressedCount: decision.suppressedCount,
+    sound: ctx.config.notificationSound,
+    timeoutSec: 60,
   })
 }
 

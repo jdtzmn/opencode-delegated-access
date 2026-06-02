@@ -10,6 +10,7 @@ import { DirectoryVerdictCache } from "./permission/directory-cache.ts"
 import { SafePathBatcher } from "./permission/safe-path-batcher.ts"
 import { ApprovalHistoryStore } from "./permission/approval-history.ts"
 import { PendingSubjectsMap } from "./permission/pending-subjects.ts"
+import { FailureNotifyRateLimiter } from "./permission/failure-notify.ts"
 import { sendNotification } from "./notify/notify.ts"
 import type { ModelRef } from "./classifier/model.ts"
 import { createLogger, type Logger } from "./log.ts"
@@ -331,6 +332,13 @@ const DelegatedAccess: Plugin = async (
     log,
   })
 
+  // Shared, plugin-lifetime rate limiter for classifier-failure
+  // notifications. Held here (not per-session) so a burst of failures across
+  // rapid permission events collapses into a single notification.
+  const failureNotifyRateLimiter = new FailureNotifyRateLimiter({
+    cooldownMs: config.classifierFailureNotifyCooldownMs,
+  })
+
   // Permissions we've already handled, shared across all three hooks so
   // each permissionID is classified once no matter which hook(s) fire.
   const handledPermissionIDs = new Set<string>()
@@ -362,6 +370,7 @@ const DelegatedAccess: Plugin = async (
       approvalHistory,
       pendingSubjects,
       safePathBatcher,
+      failureNotifyRateLimiter,
       log,
       getRepoContext,
     }
