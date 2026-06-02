@@ -150,7 +150,61 @@ export async function classifySubject(args: {
    * pass a logger, e.g. older tests).
    */
   log?: Logger
+  /**
+   * Number of extra attempts to make if the classifier prompt TIMES OUT.
+   * `0` (default) = single attempt, no retry. Only timeouts retry — other
+   * failures (unparseable verdict, session-create error, thrown prompt) are
+   * returned immediately, since retrying them just wastes time. Each retry
+   * uses a FRESH ephemeral session and the FULL `timeoutMs`.
+   */
+  retries?: number
+  /**
+   * Called exactly once with the FINAL failure class when classification
+   * ultimately fails (after any retries). Not called on success. Lets the
+   * caller surface a notification distinguishing a transient timeout from a
+   * harder error. `"timeout"` = the prompt(s) timed out; `"error"` =
+   * anything else (create error, thrown prompt, empty/unparseable response).
+   */
+  onFailure?: (failureClass: ClassifyFailureClass) => void
 }): Promise<Verdict | null> {
+  const { retries = 0, onFailure } = args
+
+  // Retry loop: only a `timeout` outcome is retried (up to `retries` times).
+  // Any other outcome is final immediately. The full `timeoutMs` is used on
+  // every attempt — a transient stall deserves a real second chance, and the
+  // success case returns fast regardless of the timeout ceiling.
+  const maxAttempts = Math.max(0, retries) + 1
+  let lastFailure: ClassifyFailureClass = "error"
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const outcome = await classifyOnce(args, attempt, maxAttempts)
+    if (outcome.kind === "verdict") return outcome.verdict
+    lastFailure = outcome.kind === "timeout" ? "timeout" : "error"
+    if (outcome.kind !== "timeout") break // only timeouts retry
+  }
+  onFailure?.(lastFailure)
+  return null
+}
+
+/** Final failure category reported to {@link classifySubject}'s `onFailure`. */
+export type ClassifyFailureClass = "timeout" | "error"
+
+/** Internal per-attempt outcome of the classifier. */
+type ClassifyOutcome =
+  | { kind: "verdict"; verdict: Verdict }
+  | { kind: "timeout" }
+  | { kind: "error" }
+
+/**
+ * A single classifier attempt: create an ephemeral session, prompt with a
+ * timeout, parse the verdict, clean up. Returns a discriminated outcome so
+ * the caller's retry loop can distinguish a retryable timeout from a final
+ * error. Never throws.
+ */
+async function classifyOnce(
+  args: Parameters<typeof classifySubject>[0],
+  attempt: number,
+  maxAttempts: number,
+): Promise<ClassifyOutcome> {
   const {
     client,
     subject,
@@ -181,11 +235,11 @@ export async function classifySubject(args: {
     log?.error("classifier: ephemeral session.create threw", {
       error: e instanceof Error ? e.message : String(e),
     })
-    return null
+    return { kind: "error" }
   }
   if (!ephemeralID) {
     log?.warn("classifier: session.create returned no session id", {})
-    return null
+    return { kind: "error" }
   }
   onEphemeralSessionCreated?.(ephemeralID)
 
@@ -243,13 +297,16 @@ export async function classifySubject(args: {
     if (timedOut) {
       log?.warn("classifier: timeout — no verdict (fail-closed)", {
         timeoutMs,
+        attempt,
+        maxAttempts,
+        willRetry: attempt < maxAttempts,
       })
-      return null
+      return { kind: "timeout" }
     }
 
     if (!response) {
       log?.warn("classifier: prompt returned no response (fail-closed)", {})
-      return null
+      return { kind: "error" }
     }
 
     // Step 3: parse.
@@ -264,13 +321,14 @@ export async function classifySubject(args: {
         rawTextLength: text.length,
         partCount: response.data?.parts?.length ?? 0,
       })
+      return { kind: "error" }
     }
-    return verdict
+    return { kind: "verdict", verdict }
   } catch (e) {
     log?.error("classifier: prompt threw (fail-closed)", {
       error: e instanceof Error ? e.message : String(e),
     })
-    return null
+    return { kind: "error" }
   } finally {
     // Step 4: best-effort cleanup. On the timeout path, give the server a
     // brief moment to fully quiesce the aborted stream before we delete —

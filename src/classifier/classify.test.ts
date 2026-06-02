@@ -602,6 +602,153 @@ describe("classifyCommand", () => {
       expect(failure).toBeUndefined()
     })
   })
+
+  // -------------------------------------------------------------------------
+  // Retry on timeout (Phase A): a transient classifier timeout should be
+  // retried (with a fresh ephemeral session) up to `retries` times before
+  // giving up. Only timeouts retry — other failures (unparseable verdict,
+  // create error) must NOT retry, since retrying them just wastes time.
+  // -------------------------------------------------------------------------
+  describe("retry on timeout", () => {
+    it("retries after a timeout and returns the verdict from the retry", async () => {
+      let attempt = 0
+      const { client, calls } = mockClient({
+        prompt: () => {
+          attempt++
+          if (attempt === 1) {
+            // First attempt hangs → timeout.
+            return new Promise(() => {})
+          }
+          // Retry succeeds.
+          return Promise.resolve({
+            data: {
+              info: {},
+              parts: [{ type: "text", text: "VERDICT: SAFE\nREASON: retry-ok" }],
+            },
+          })
+        },
+      })
+
+      const result = await classifyCommand({
+        ...baseArgs,
+        client,
+        timeoutMs: 30,
+        retries: 1,
+      })
+
+      expect(result).toEqual<Verdict>({ verdict: "SAFE", reason: "retry-ok" })
+      // Two prompt attempts, two fresh sessions created + deleted.
+      expect(calls.prompt).toHaveBeenCalledTimes(2)
+      expect(calls.create).toHaveBeenCalledTimes(2)
+      expect(calls.del).toHaveBeenCalledTimes(2)
+    })
+
+    it("returns null after exhausting retries when every attempt times out", async () => {
+      const { client, calls } = mockClient({
+        prompt: () => new Promise(() => {}),
+      })
+
+      const result = await classifyCommand({
+        ...baseArgs,
+        client,
+        timeoutMs: 20,
+        retries: 1,
+      })
+
+      expect(result).toBeNull()
+      // Initial attempt + 1 retry = 2 prompt calls.
+      expect(calls.prompt).toHaveBeenCalledTimes(2)
+    })
+
+    it("does NOT retry a non-timeout failure (unparseable verdict)", async () => {
+      const { client, calls } = mockClient({
+        prompt: async () => ({
+          data: {
+            info: {},
+            parts: [{ type: "text", text: "I am not a verdict" }],
+          },
+        }),
+      })
+
+      const result = await classifyCommand({
+        ...baseArgs,
+        client,
+        timeoutMs: 5_000,
+        retries: 1,
+      })
+
+      expect(result).toBeNull()
+      // Only one attempt — unparseable output must not trigger a retry.
+      expect(calls.prompt).toHaveBeenCalledTimes(1)
+    })
+
+    it("does not retry when retries is 0 (default behaviour preserved)", async () => {
+      const { client, calls } = mockClient({
+        prompt: () => new Promise(() => {}),
+      })
+
+      const result = await classifyCommand({
+        ...baseArgs,
+        client,
+        timeoutMs: 20,
+        retries: 0,
+      })
+
+      expect(result).toBeNull()
+      expect(calls.prompt).toHaveBeenCalledTimes(1)
+    })
+
+    it("reports the final failure class via onFailure (timeout)", async () => {
+      const onFailure = vi.fn()
+      const { client } = mockClient({
+        prompt: () => new Promise(() => {}),
+      })
+
+      await classifyCommand({
+        ...baseArgs,
+        client,
+        timeoutMs: 20,
+        retries: 1,
+        onFailure,
+      })
+
+      expect(onFailure).toHaveBeenCalledTimes(1)
+      expect(onFailure).toHaveBeenCalledWith("timeout")
+    })
+
+    it("reports the final failure class via onFailure (error) for non-timeout failures", async () => {
+      const onFailure = vi.fn()
+      const { client } = mockClient({
+        prompt: async () => ({
+          data: { info: {}, parts: [{ type: "text", text: "nope" }] },
+        }),
+      })
+
+      await classifyCommand({
+        ...baseArgs,
+        client,
+        timeoutMs: 5_000,
+        retries: 1,
+        onFailure,
+      })
+
+      expect(onFailure).toHaveBeenCalledTimes(1)
+      expect(onFailure).toHaveBeenCalledWith("error")
+    })
+
+    it("does not call onFailure on a successful classification", async () => {
+      const onFailure = vi.fn()
+      const { client } = mockClient({})
+      const result = await classifyCommand({
+        ...baseArgs,
+        client,
+        retries: 1,
+        onFailure,
+      })
+      expect(result).toEqual({ verdict: "SAFE", reason: "test-default" })
+      expect(onFailure).not.toHaveBeenCalled()
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
