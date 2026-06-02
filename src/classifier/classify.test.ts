@@ -2,6 +2,36 @@ import { describe, it, expect, vi } from "vitest"
 import { classifyCommand, classifySubject } from "./classify.ts"
 import type { Verdict } from "./parse.ts"
 import type { ApprovalEntry } from "../permission/approval-history.ts"
+import type { Logger } from "../log.ts"
+
+/**
+ * A capturing Logger for asserting diagnostic output. Records every call as
+ * `{ level, message, extra }` so tests can assert that failure branches emit
+ * actionable detail (the whole point of Phase 1 observability).
+ */
+function fakeLogger(): {
+  log: Logger
+  entries: Array<{
+    level: "debug" | "info" | "warn" | "error"
+    message: string
+    extra?: Record<string, unknown>
+  }>
+} {
+  const entries: Array<{
+    level: "debug" | "info" | "warn" | "error"
+    message: string
+    extra?: Record<string, unknown>
+  }> = []
+  const mk =
+    (level: "debug" | "info" | "warn" | "error") =>
+    (message: string, extra?: Record<string, unknown>) => {
+      entries.push({ level, message, ...(extra ? { extra } : {}) })
+    }
+  return {
+    log: { debug: mk("debug"), info: mk("info"), warn: mk("warn"), error: mk("error") },
+    entries,
+  }
+}
 
 /**
  * Build a mock opencode client whose session.create / prompt / delete methods
@@ -478,6 +508,88 @@ describe("classifyCommand", () => {
 
     expect(created).not.toHaveBeenCalled()
     expect(deleted).not.toHaveBeenCalled()
+  })
+
+  // -------------------------------------------------------------------------
+  // Observability (Phase 1): every failure branch must emit an actionable log
+  // line so a future upstream break isn't silently swallowed by `catch {}`.
+  // -------------------------------------------------------------------------
+  describe("observability", () => {
+    it("logs the underlying error when session.create throws", async () => {
+      const { log, entries } = fakeLogger()
+      const { client } = mockClient({
+        create: async () => {
+          throw new Error("cannot create")
+        },
+      })
+      await classifyCommand({ ...baseArgs, client, log })
+      const failure = entries.find((e) => e.level === "warn" || e.level === "error")
+      expect(failure).toBeDefined()
+      expect(JSON.stringify(failure)).toContain("cannot create")
+    })
+
+    it("logs when session.create returns no session id", async () => {
+      const { log, entries } = fakeLogger()
+      const { client } = mockClient({
+        create: async () => ({ data: undefined }),
+      })
+      await classifyCommand({ ...baseArgs, client, log })
+      const failure = entries.find((e) => e.level === "warn" || e.level === "error")
+      expect(failure).toBeDefined()
+      expect(failure?.message.toLowerCase()).toContain("session")
+    })
+
+    it("logs the underlying error when the prompt throws", async () => {
+      const { log, entries } = fakeLogger()
+      const { client } = mockClient({
+        prompt: async () => {
+          throw new Error("network boom")
+        },
+      })
+      await classifyCommand({ ...baseArgs, client, log })
+      const failure = entries.find((e) => e.level === "warn" || e.level === "error")
+      expect(failure).toBeDefined()
+      expect(JSON.stringify(failure)).toContain("network boom")
+    })
+
+    it("logs a timeout distinctly (not a generic failure)", async () => {
+      const { log, entries } = fakeLogger()
+      const { client } = mockClient({
+        prompt: () => new Promise(() => {}),
+      })
+      await classifyCommand({ ...baseArgs, client, timeoutMs: 30, log })
+      const failure = entries.find((e) => e.level === "warn" || e.level === "error")
+      expect(failure).toBeDefined()
+      expect(JSON.stringify(failure).toLowerCase()).toContain("timeout")
+    })
+
+    it("logs the raw (truncated) response text when the verdict can't be parsed", async () => {
+      const { log, entries } = fakeLogger()
+      const { client } = mockClient({
+        prompt: async () => ({
+          data: {
+            info: {},
+            parts: [
+              { type: "text", text: "I went ahead and ran the command for you." },
+            ],
+          },
+        }),
+      })
+      await classifyCommand({ ...baseArgs, client, log })
+      const failure = entries.find((e) => e.level === "warn" || e.level === "error")
+      expect(failure).toBeDefined()
+      // The raw model text must be surfaced so an output-format break is debuggable.
+      expect(JSON.stringify(failure)).toContain("I went ahead and ran the command")
+    })
+
+    it("does not log a failure on the happy path", async () => {
+      const { log, entries } = fakeLogger()
+      const { client } = mockClient({})
+      const result = await classifyCommand({ ...baseArgs, client, log })
+      expect(result).toEqual({ verdict: "SAFE", reason: "test-default" })
+      const failure = entries.find((e) => e.level === "warn" || e.level === "error")
+      expect(failure).toBeUndefined()
+    })
   })
 })
 

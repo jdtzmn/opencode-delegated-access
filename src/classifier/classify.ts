@@ -7,6 +7,7 @@ import { parseVerdict, type Verdict } from "./parse.ts"
 import type { ModelRef } from "./model.ts"
 import type { RepoContext, DualRepoContext } from "../repo-context.ts"
 import type { ApprovalEntry } from "../permission/approval-history.ts"
+import type { Logger } from "../log.ts"
 
 type OpencodeClient = ReturnType<typeof createOpencodeClient>
 
@@ -89,6 +90,15 @@ export async function classifySubject(args: {
    * from their tracking set here.
    */
   onEphemeralSessionDeleted?: (id: string) => void
+  /**
+   * Optional diagnostic logger. Every fail-closed branch (create error,
+   * missing session id, prompt error, timeout, empty response, unparseable
+   * verdict) emits an actionable log line so an upstream API break isn't
+   * silently swallowed by the fail-closed `catch`. When omitted, failures
+   * are silent (preserves the historical behaviour for callers that don't
+   * pass a logger, e.g. older tests).
+   */
+  log?: Logger
 }): Promise<Verdict | null> {
   const {
     client,
@@ -103,6 +113,7 @@ export async function classifySubject(args: {
     priorApprovals,
     onEphemeralSessionCreated,
     onEphemeralSessionDeleted,
+    log,
   } = args
 
   // Step 1: create ephemeral child session.
@@ -115,10 +126,16 @@ export async function classifySubject(args: {
       },
     } as never)
     ephemeralID = (created as { data?: { id?: string } }).data?.id
-  } catch {
+  } catch (e) {
+    log?.error("classifier: ephemeral session.create threw", {
+      error: e instanceof Error ? e.message : String(e),
+    })
     return null
   }
-  if (!ephemeralID) return null
+  if (!ephemeralID) {
+    log?.warn("classifier: session.create returned no session id", {})
+    return null
+  }
   onEphemeralSessionCreated?.(ephemeralID)
 
   let timedOut = false
@@ -172,14 +189,36 @@ export async function classifySubject(args: {
     // text that would otherwise auto-approve a command whose classification
     // never actually completed — violating the plugin's fail-closed
     // contract (see README "How it's safe").
-    if (timedOut) return null
+    if (timedOut) {
+      log?.warn("classifier: timeout — no verdict (fail-closed)", {
+        timeoutMs,
+      })
+      return null
+    }
 
-    if (!response) return null
+    if (!response) {
+      log?.warn("classifier: prompt returned no response (fail-closed)", {})
+      return null
+    }
 
     // Step 3: parse.
     const text = responseTextFromParts(response.data?.parts ?? [])
-    return parseVerdict(text)
-  } catch {
+    const verdict = parseVerdict(text)
+    if (!verdict) {
+      // Surface the raw model text (truncated) so an output-format break —
+      // e.g. the model looping on tool calls and never emitting a VERDICT
+      // line — is debuggable instead of a silent fail-closed.
+      log?.warn("classifier: response did not parse to a verdict (fail-closed)", {
+        rawTextPreview: text.slice(0, 500),
+        rawTextLength: text.length,
+        partCount: response.data?.parts?.length ?? 0,
+      })
+    }
+    return verdict
+  } catch (e) {
+    log?.error("classifier: prompt threw (fail-closed)", {
+      error: e instanceof Error ? e.message : String(e),
+    })
     return null
   } finally {
     // Step 4: best-effort cleanup. On the timeout path, give the server a

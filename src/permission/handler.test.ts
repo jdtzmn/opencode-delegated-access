@@ -362,6 +362,17 @@ describe("handlePermissionEvent", () => {
     })
   })
 
+  it("forwards ctx.log to the classifier so failures are observable", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx, log } = buildCtx()
+    await handlePermissionEvent(basePermission(), ctx)
+
+    const args = mockedClassify.mock.calls[0]?.[0]
+    expect(args?.log).toBe(log)
+  })
+
   it("does nothing when no classifier model can be resolved", async () => {
     const { ctx, respondCall } = buildCtx({
       sessionModel: undefined,
