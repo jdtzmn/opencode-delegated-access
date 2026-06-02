@@ -37,6 +37,45 @@ describe("CLASSIFIER_SYSTEM_PROMPT", () => {
       /do not (call|use|run|invoke).{0,30}tool|no tools|without (using|calling).{0,20}tool/,
     )
   })
+
+  it("tells the model a prior approval CAN flip a not-requested-only RISKY to SAFE", () => {
+    // The core of option 2a: when the ONLY reason a command would be RISKY is
+    // that the human hasn't explicitly asked for it, a similar prior APPROVAL
+    // is sufficient evidence to flip it SAFE. Without this, the model treats
+    // prior approvals as weak hints it routinely ignores.
+    const lower = CLASSIFIER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/only reason|sole reason|solely because/)
+    expect(lower).toMatch(/not (been )?(explicitly )?(requested|asked)/)
+    expect(lower).toMatch(/flip|treat (it )?as safe|classify (it )?safe|lean safe/)
+  })
+
+  it("keeps data exfiltration (sending local data out) in the never-flip list", () => {
+    // Even though a plain network fetch may be flippable, sending LOCAL data
+    // outbound (curl --data @file, uploading secrets) must never be flipped by
+    // a prior approval — that's exfiltration, not a benign fetch.
+    const lower = CLASSIFIER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/exfiltrat|--data|--upload|sending.{0,20}data|uploading/)
+  })
+
+  it("requires the prior approval to share the same host/target, not just the same verb", () => {
+    const lower = CLASSIFIER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/same (host|target|repo|path)|same.{0,20}(host|target)/)
+  })
+
+  it("keeps an EXPLICIT (non-handwavy) list of categories prior approvals can NEVER flip", () => {
+    // The safety counterweight: broadening the flip must be paired with an
+    // explicit, enumerated never-flip list so a prior approval can never wave
+    // through an intrinsically dangerous command. No bare "etc." standing in
+    // for the dangerous categories.
+    const lower = CLASSIFIER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/never.{0,40}(flip|override|safe)/)
+    // Each hard-RISKY category must be named in the never-flip guarantee.
+    expect(lower).toMatch(/destructive/)
+    expect(lower).toMatch(/privilege|sudo/)
+    expect(lower).toMatch(/credential|secret/)
+    expect(lower).toMatch(/network|curl|pipe/)
+    expect(lower).toMatch(/force push|force-push/)
+  })
 })
 
 describe("buildClassifierUserPrompt", () => {

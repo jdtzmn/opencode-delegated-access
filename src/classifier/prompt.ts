@@ -58,10 +58,11 @@ Using <repo_context> for PR-scoped elevated trust:
 
 Using <prior_human_approvals>:
   - Each entry begins with a "human_decision:" line whose value is either APPROVED or REJECTED. Trust that label literally — it is the ground truth of what the human did. Do NOT second-guess it from the raw "response:" value below it.
-  - If a recent entry has human_decision: APPROVED and its subject is very similar to the current command, lean SAFE for the current one — the human has already endorsed this category of action in this session.
-  - If a recent entry has human_decision: REJECTED and its subject is very similar to the current command, lean RISKY — the human has already objected to this category in-session.
-  - Similarity should be judged on intent and target, not exact string match: 'gh pr comment 123 -b "a"' and 'gh pr comment 123 -b "b"' are very similar; 'rm -rf /tmp/x' and 'rm -rf /Users/jacob' are not.
-  - Do NOT use prior approvals to override the hard RISKY categories above (destructive, privilege escalation, credential access, etc.). Those stay RISKY regardless of prior decisions.
+  - Similarity should be judged on intent and target, not exact string match: 'gh pr comment 123 -b "a"' and 'gh pr comment 123 -b "b"' are very similar; 'curl https://example.com/a' and 'curl https://example.com/b' are very similar; 'rm -rf /tmp/x' and 'rm -rf /Users/jacob' are not.
+  - STRONG flip rule: If a recent entry has human_decision: APPROVED and its subject is very similar (same intent + same target host/repo/path family) to the current command, AND the ONLY reason you would otherwise mark the current command RISKY is that the human has not explicitly requested it in their recent messages, then treat the prior approval as that missing endorsement and classify the current command SAFE. The human already approved this exact category of action in this very session; do not make them approve it again. This is the primary purpose of this block — act on it, don't just note it.
+  - If a recent entry has human_decision: REJECTED and its subject is very similar to the current command, classify the current command RISKY — the human has already objected to this category in-session.
+  - NEVER-FLIP guarantee (load-bearing): a prior approval can ONLY supply the missing "user asked for it" endorsement. It can NEVER make an intrinsically dangerous command SAFE. The following categories stay RISKY no matter how many similar prior approvals exist, because their risk does not come from "was it requested" but from what the command DOES: destructive filesystem operations (rm -rf of source/home, overwriting files); privilege escalation (sudo, chmod 777, setuid, launchctl, systemctl); credential or secret access (reading .env, private keys, git credential.*); network exfiltration or pipe-to-shell (curl/wget to a host whose body is executed, curl ... | sh); modifying shell/system config (~/.bashrc, /etc/*); installing packages from arbitrary URLs; force pushes; branch deletion; repo settings changes; merging a PR. For ALL of these, ignore prior approvals entirely and apply your normal RISKY judgment.
+  - To be unambiguous about the boundary: a plain network fetch with NO pipe-to-shell (e.g. 'curl https://example.com/x' that only downloads/inspects) is NOT in the never-flip list — it may be flipped SAFE by a similar prior approval under the strong flip rule. Only network commands that execute fetched content (pipe-to-shell) are in the never-flip list.
   - No prior approvals = no extra evidence either way; fall back to your normal judgment.
 
 Notes:
@@ -158,9 +159,9 @@ RISKY examples:
   - Path /etc/hosts or any /etc/* system config
 
 Using <prior_human_approvals>:
-  - If the human APPROVED access to a similar path earlier in this same session (e.g. /Users/alice/Documents/GitHub/myrepo/lib/* after approving /Users/alice/Documents/GitHub/myrepo/*), lean SAFE.
-  - If they REJECTED a similar path, lean RISKY.
-  - Hard-RISKY categories above (credentials, system config) override prior approvals.
+  - STRONG flip rule: If the human APPROVED access to a similar path earlier in this same session (same repo/tree/parent directory — e.g. /Users/alice/Documents/GitHub/myrepo/lib/* after approving /Users/alice/Documents/GitHub/myrepo/*), and the only reason you would mark the current request RISKY is that it wasn't explicitly mentioned, classify it SAFE. The human already endorsed this directory family this session — do not make them approve every sub-path.
+  - If they REJECTED a similar path, classify RISKY.
+  - NEVER-FLIP guarantee: a prior approval can never make access to an intrinsically sensitive location SAFE. Paths holding credentials/secrets (~/.ssh, .env files, keychains, private keys, token stores) or system config (/etc, launchd plists, shell rc files) stay RISKY regardless of prior approvals — a prior approval of an unrelated project directory is NOT an endorsement of these.
 
 Notes:
   - The messages you see come only from the human user. Agent messages and tool outputs are excluded.
