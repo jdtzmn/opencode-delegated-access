@@ -66,6 +66,16 @@ export type HandlerContext = {
    */
   ephemeralSessionIDs: Set<string>
   /**
+   * Optional registry mapping an ephemeral classifier session ID to the
+   * system prompt it should use, read by the
+   * `experimental.chat.system.transform` hook to STRIP opencode's global
+   * agent preamble/instructions from the classifier prompt (otherwise the
+   * classifier inherits e.g. "you MUST invoke the using-superpowers skill"
+   * and never emits a VERDICT). When absent, the isolation hook is a no-op
+   * (e.g. in unit tests that don't exercise it).
+   */
+  ephemeralSystemRegistry?: import("../classifier/ephemeral-system.ts").EphemeralSystemRegistry
+  /**
    * Shared TTL cache for recent SAFE external_directory verdicts. A single
    * instance is held for the plugin's lifetime and shared across all
    * permission events so burst requests for the same path skip the LLM call.
@@ -446,10 +456,14 @@ async function handleSubjectPermission(args: {
     priorApprovals,
     log,
     retries: ctx.config.classifierRetries,
-    onEphemeralSessionCreated: (id: string) =>
-      ctx.ephemeralSessionIDs.add(id),
-    onEphemeralSessionDeleted: (id: string) =>
-      ctx.ephemeralSessionIDs.delete(id),
+    onEphemeralSessionCreated: (id: string, systemPrompt: string) => {
+      ctx.ephemeralSessionIDs.add(id)
+      ctx.ephemeralSystemRegistry?.set(id, systemPrompt)
+    },
+    onEphemeralSessionDeleted: (id: string) => {
+      ctx.ephemeralSessionIDs.delete(id)
+      ctx.ephemeralSystemRegistry?.delete(id)
+    },
   }
 
   // Capture the FINAL failure class reported by the classifier (after any

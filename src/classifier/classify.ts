@@ -128,13 +128,14 @@ export async function classifySubject(args: {
    */
   priorApprovals?: ApprovalEntry[]
   /**
-   * Called with the ephemeral classifier session's ID as soon as it's
-   * created. Callers can track these IDs to filter out downstream
-   * `permission.asked` events the classifier session itself might generate
-   * (defense-in-depth — the classifier uses `tools: { "*": false }` so in
-   * practice it can't request any permissions).
+   * Called with the ephemeral classifier session's ID AND the system prompt
+   * that session will use, as soon as the session is created. Callers track
+   * the ID to filter out downstream `permission.asked` events the classifier
+   * session might generate (loop-guard), and register the system prompt for
+   * the `experimental.chat.system.transform` isolation hook (so the global
+   * agent preamble/instructions are stripped from the classifier prompt).
    */
-  onEphemeralSessionCreated?: (id: string) => void
+  onEphemeralSessionCreated?: (id: string, systemPrompt: string) => void
   /**
    * Called with the ephemeral session's ID after deletion completes (or
    * fails — cleanup is best-effort). Callers should clear the session ID
@@ -241,7 +242,7 @@ async function classifyOnce(
     log?.warn("classifier: session.create returned no session id", {})
     return { kind: "error" }
   }
-  onEphemeralSessionCreated?.(ephemeralID)
+  onEphemeralSessionCreated?.(ephemeralID, systemPrompt)
 
   let timedOut = false
   try {

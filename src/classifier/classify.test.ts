@@ -472,7 +472,8 @@ describe("classifyCommand", () => {
     })
 
     expect(created).toHaveBeenCalledTimes(1)
-    expect(created).toHaveBeenCalledWith("sess_eph")
+    // created now receives (id, systemPrompt); assert the id positionally.
+    expect(created.mock.calls[0]?.[0]).toBe("sess_eph")
     expect(deleted).toHaveBeenCalledTimes(1)
     expect(deleted).toHaveBeenCalledWith("sess_eph")
     // Order: created before deleted.
@@ -519,6 +520,25 @@ describe("classifyCommand", () => {
 
     expect(created).not.toHaveBeenCalled()
     expect(deleted).not.toHaveBeenCalled()
+  })
+
+  it("passes the system prompt alongside the session id to onEphemeralSessionCreated", async () => {
+    const { client } = mockClient({})
+    const created = vi.fn()
+
+    await classifyCommand({
+      ...baseArgs,
+      client,
+      onEphemeralSessionCreated: created,
+    })
+
+    expect(created).toHaveBeenCalledTimes(1)
+    const [id, systemPrompt] = created.mock.calls[0] ?? []
+    expect(id).toBe("sess_eph")
+    // The classifier's bash system prompt must be supplied so the caller can
+    // register it for the system-transform isolation hook.
+    expect(typeof systemPrompt).toBe("string")
+    expect(systemPrompt).toMatch(/safety classifier/i)
   })
 
   // -------------------------------------------------------------------------

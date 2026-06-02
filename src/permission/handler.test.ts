@@ -47,6 +47,7 @@ import {
   FailureNotifyRateLimiter,
 } from "./failure-notify.ts"
 import { handlePermissionEvent } from "./handler.ts"
+import { EphemeralSystemRegistry } from "../classifier/ephemeral-system.ts"
 import { DirectoryVerdictCache } from "./directory-cache.ts"
 import { SafePathBatcher } from "./safe-path-batcher.ts"
 import { ApprovalHistoryStore } from "./approval-history.ts"
@@ -116,6 +117,7 @@ function buildCtx(overrides: Partial<{
   approvalHistoryMax: number
   notifyOnClassifierFailure: boolean
   failureNotifyRateLimiter: FailureNotifyRateLimiter
+  ephemeralSystemRegistry: EphemeralSystemRegistry
 }> = {}) {
   const respondCall = vi.fn(
     overrides.respondImpl ?? (async () => ({ data: true } as unknown)),
@@ -168,6 +170,9 @@ function buildCtx(overrides: Partial<{
       new FailureNotifyRateLimiter({
         cooldownMs: DEFAULT_CONFIG.classifierFailureNotifyCooldownMs,
       }),
+    ...(overrides.ephemeralSystemRegistry !== undefined
+      ? { ephemeralSystemRegistry: overrides.ephemeralSystemRegistry }
+      : {}),
     log,
     ...(overrides.getRepoContext !== undefined
       ? {
@@ -500,6 +505,37 @@ describe("handlePermissionEvent", () => {
     expect(args?.retries).toBe(1)
   })
 
+  it("registers the ephemeral session's system prompt for the isolation hook", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const registry = new EphemeralSystemRegistry()
+    const { ctx } = buildCtx({ ephemeralSystemRegistry: registry })
+    await handlePermissionEvent(basePermission(), ctx)
+
+    // The handler must wire onEphemeralSessionCreated so that (id, prompt)
+    // lands in the registry. Simulate the classifier invoking the callback.
+    const onCreated = mockedClassify.mock.calls[0]?.[0]?.onEphemeralSessionCreated
+    expect(typeof onCreated).toBe("function")
+    onCreated?.("sess_eph_test", "CLASSIFIER SYSTEM PROMPT")
+    expect(registry.get("sess_eph_test")).toBe("CLASSIFIER SYSTEM PROMPT")
+  })
+
+  it("clears the ephemeral system prompt from the registry on session delete", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const registry = new EphemeralSystemRegistry()
+    const { ctx } = buildCtx({ ephemeralSystemRegistry: registry })
+    await handlePermissionEvent(basePermission(), ctx)
+
+    const call = mockedClassify.mock.calls[0]?.[0]
+    call?.onEphemeralSessionCreated?.("sess_eph_test", "P")
+    expect(registry.has("sess_eph_test")).toBe(true)
+    call?.onEphemeralSessionDeleted?.("sess_eph_test")
+    expect(registry.has("sess_eph_test")).toBe(false)
+  })
+
   it("does nothing when no classifier model can be resolved", async () => {
     const { ctx, respondCall } = buildCtx({
       sessionModel: undefined,
@@ -522,7 +558,7 @@ describe("handlePermissionEvent", () => {
     expect(typeof args?.onEphemeralSessionDeleted).toBe("function")
 
     // Exercise the callbacks to confirm they update the tracking set.
-    args?.onEphemeralSessionCreated?.("sess_eph_abc")
+    args?.onEphemeralSessionCreated?.("sess_eph_abc", "system prompt")
     expect(ctx.ephemeralSessionIDs.has("sess_eph_abc")).toBe(true)
     args?.onEphemeralSessionDeleted?.("sess_eph_abc")
     expect(ctx.ephemeralSessionIDs.has("sess_eph_abc")).toBe(false)

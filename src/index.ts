@@ -11,6 +11,10 @@ import { SafePathBatcher } from "./permission/safe-path-batcher.ts"
 import { ApprovalHistoryStore } from "./permission/approval-history.ts"
 import { PendingSubjectsMap } from "./permission/pending-subjects.ts"
 import { FailureNotifyRateLimiter } from "./permission/failure-notify.ts"
+import {
+  EphemeralSystemRegistry,
+  applyEphemeralSystemTransform,
+} from "./classifier/ephemeral-system.ts"
 import { sendNotification } from "./notify/notify.ts"
 import type { ModelRef } from "./classifier/model.ts"
 import { createLogger, type Logger } from "./log.ts"
@@ -295,6 +299,14 @@ const DelegatedAccess: Plugin = async (
   // `tools: { "*": false }` and shouldn't request permissions).
   const ephemeralSessionIDs = new Set<string>()
 
+  // Maps each ephemeral classifier session ID to the system prompt it should
+  // use. Read by the `experimental.chat.system.transform` hook below to strip
+  // opencode's global agent preamble/instructions from the classifier prompt
+  // (otherwise the classifier inherits e.g. the superpowers "you MUST invoke
+  // the skill" directive and replies conversationally instead of emitting a
+  // VERDICT — observed as repeated parse failures in production).
+  const ephemeralSystemRegistry = new EphemeralSystemRegistry()
+
   // Shared TTL cache for recent SAFE external_directory verdicts. Held at
   // plugin lifetime (not per-session) so burst deduplication works across
   // rapid-fire permission events on the same session.
@@ -371,6 +383,7 @@ const DelegatedAccess: Plugin = async (
       pendingSubjects,
       safePathBatcher,
       failureNotifyRateLimiter,
+      ephemeralSystemRegistry,
       log,
       getRepoContext,
     }
@@ -432,6 +445,27 @@ const DelegatedAccess: Plugin = async (
   }
 
   return {
+    // Isolate the ephemeral classifier session's system prompt from
+    // opencode's global agent preamble + instructions. `session.prompt`'s
+    // `system` field is ADDED to (not a replacement for) the assembled system
+    // context, so without this the classifier inherits AGENTS.md / skill
+    // preambles (e.g. "you MUST invoke the using-superpowers skill before ANY
+    // response") and replies conversationally instead of emitting a VERDICT —
+    // observed in production as repeated `classifier: response did not parse`
+    // failures. For OUR ephemeral classifier sessions only, replace the whole
+    // system array with just the registered classifier prompt.
+    //
+    // Registered via a direct string key (and cast) since the Hooks type
+    // marks this hook experimental/optional.
+    ...({
+      "experimental.chat.system.transform": async (
+        input: { sessionID?: string; model: unknown },
+        output: { system: string[] },
+      ) => {
+        applyEphemeralSystemTransform(input, output, ephemeralSystemRegistry)
+      },
+    } as Record<string, (input: unknown, output: unknown) => Promise<void>>),
+
     config: async (input) => {
       // The plugin's own config (enabled, safeCountdownMs, etc.) is no
       // longer read from this hook — it's resolved at factory time from
