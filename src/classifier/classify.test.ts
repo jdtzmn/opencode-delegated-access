@@ -151,11 +151,22 @@ describe("classifyCommand", () => {
     expect(arg?.body?.model).toEqual(baseArgs.model)
     expect(typeof arg?.body?.system).toBe("string")
     expect(arg?.body?.system.length).toBeGreaterThan(20)
-    // `tools: { "*": false }` denies ALL tools for this prompt (the legacy
-    // `tools: {}` is interpreted as "no overrides" by opencode 1.4.x, which
-    // meant the classifier was actually getting the full tool registry and
-    // attempting to run the command it was supposed to judge).
-    expect(arg?.body?.tools).toEqual({ "*": false })
+    // Tool denial must survive the user's own permission allowlist. A bare
+    // `{ "*": false }` wildcard is the LEAST-specific permission rule, so a
+    // user config like `permission.bash["git status"] = "allow"` overrides
+    // it and re-enables tools — which is exactly what made the classifier
+    // loop on tool calls in opencode 1.15.x instead of returning a verdict.
+    // We therefore deny each built-in tool BY NAME (same specificity as a
+    // user allow) in addition to the wildcard catch-all.
+    expect(arg?.body?.tools?.["*"]).toBe(false)
+    expect(arg?.body?.tools?.bash).toBe(false)
+    expect(arg?.body?.tools?.edit).toBe(false)
+    expect(arg?.body?.tools?.write).toBe(false)
+    expect(arg?.body?.tools?.read).toBe(false)
+    // Every value in the tools map must be `false` (deny) — no accidental allow.
+    expect(
+      Object.values(arg?.body?.tools ?? {}).every((v) => v === false),
+    ).toBe(true)
     expect(Array.isArray(arg?.body?.parts)).toBe(true)
     const firstPart = arg?.body?.parts?.[0]
     expect(firstPart?.type).toBe("text")

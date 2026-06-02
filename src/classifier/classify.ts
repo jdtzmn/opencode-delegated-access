@@ -18,6 +18,57 @@ type OpencodeClient = ReturnType<typeof createOpencodeClient>
 const CLASSIFIER_SESSION_TITLE = "[delegated-access classifier]"
 
 /**
+ * Built-in opencode tool names we explicitly deny for the classifier prompt.
+ *
+ * Why not just `{ "*": false }`? opencode resolves the effective tool set by
+ * merging permission rules from the agent default, the project/global
+ * `opencode.json`, and the per-prompt `tools` map. The wildcard `"*"` is the
+ * LEAST-specific rule, so a user's own allowlist — e.g.
+ * `permission.bash["git status"] = "allow"`, `"bun *": "allow"`, `"ls":
+ * "allow"` — is MORE specific and overrides the wildcard deny, re-enabling
+ * tools for the classifier. That is exactly the regression observed on
+ * opencode 1.15.x: the ephemeral classifier session resolved the full
+ * registry and ran a multi-step agentic tool loop instead of returning a
+ * one-shot verdict, so no parseable `VERDICT:` line was ever produced and
+ * every classification failed closed.
+ *
+ * Denying each tool BY NAME gives our deny the same specificity as a user's
+ * by-name allow, so a tool can't be re-enabled out from under us. We keep the
+ * `"*": false` wildcard too as a catch-all for any tool not in this list
+ * (custom/MCP/plugin tools). New built-in tools added upstream are still
+ * covered by the wildcard; this list just hardens the common ones a user is
+ * most likely to have allow-listed.
+ */
+const DENIED_TOOL_NAMES = [
+  "bash",
+  "edit",
+  "write",
+  "read",
+  "glob",
+  "grep",
+  "list",
+  "patch",
+  "todowrite",
+  "todoread",
+  "webfetch",
+  "task",
+  "question",
+  "skill",
+  "invalid",
+] as const
+
+/**
+ * Build the per-prompt `tools` deny map: `"*": false` plus an explicit
+ * `false` for every name in {@link DENIED_TOOL_NAMES}. See that constant's
+ * doc comment for why the by-name entries are load-bearing.
+ */
+function buildToolDenyMap(): Record<string, boolean> {
+  const map: Record<string, boolean> = { "*": false }
+  for (const name of DENIED_TOOL_NAMES) map[name] = false
+  return map
+}
+
+/**
  * Run the safety classifier for a permission subject (a bash command, a
  * directory path, or any future permission type) and return a verdict.
  *
@@ -153,14 +204,14 @@ export async function classifySubject(args: {
       body: {
         model,
         system: systemPrompt,
-        // Deny ALL tools for this prompt. In opencode 1.4.x, `tools: {}` is
-        // interpreted as "no overrides" and the ephemeral session still
-        // receives the full tool registry — which the classifier has been
-        // observed to actually invoke (e.g. calling `bash` to run the very
-        // command it was supposed to merely classify). The wildcard `"*":
-        // false` form explicitly denies every tool via the server's
-        // permission ruleset.
-        tools: { "*": false },
+        // Deny ALL tools for this prompt. A bare `{ "*": false }` is NOT
+        // enough on opencode 1.15.x: the wildcard is the least-specific
+        // permission rule, so a user's by-name allowlist (e.g.
+        // `permission.bash["ls"] = "allow"`) overrides it and re-enables
+        // tools, making the classifier loop on tool calls instead of
+        // answering. We therefore deny each built-in tool by name too (same
+        // specificity as a user allow). See `buildToolDenyMap`.
+        tools: buildToolDenyMap(),
         parts: [{ type: "text", text: userPrompt }],
       },
     } as never)

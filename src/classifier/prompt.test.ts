@@ -27,6 +27,16 @@ describe("CLASSIFIER_SYSTEM_PROMPT", () => {
   it("makes clear that messages come from the human user (not the agent)", () => {
     expect(CLASSIFIER_SYSTEM_PROMPT.toLowerCase()).toMatch(/human|user/)
   })
+
+  it("instructs the model not to use tools and to answer in one turn", () => {
+    // Belt-and-suspenders: even if a tool somehow stays enabled (e.g. a
+    // user allowlist overrides our deny map), the prompt must steer the
+    // model to reply with the verdict directly instead of looping on tool
+    // calls — the failure mode observed on opencode 1.15.x.
+    expect(CLASSIFIER_SYSTEM_PROMPT.toLowerCase()).toMatch(
+      /do not (call|use|run|invoke).{0,30}tool|no tools|without (using|calling).{0,20}tool/,
+    )
+  })
 })
 
 describe("buildClassifierUserPrompt", () => {
@@ -227,6 +237,12 @@ describe("DIRECTORY_CLASSIFIER_SYSTEM_PROMPT", () => {
 
   it("is distinct from the bash classifier system prompt", () => {
     expect(DIRECTORY_CLASSIFIER_SYSTEM_PROMPT).not.toBe(CLASSIFIER_SYSTEM_PROMPT)
+  })
+
+  it("instructs the model not to use tools and to answer in one turn", () => {
+    expect(DIRECTORY_CLASSIFIER_SYSTEM_PROMPT.toLowerCase()).toMatch(
+      /do not (call|use|run|invoke).{0,30}tool|no tools|without (using|calling).{0,20}tool/,
+    )
   })
 })
 
