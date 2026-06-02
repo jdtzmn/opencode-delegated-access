@@ -171,7 +171,7 @@ export async function handlePermissionEvent(
 
   // Dispatch by permission type.
   if (toolType && BASH_TYPE_MATCHES.has(toolType)) {
-    const command = extractCommand(patterns)
+    const command = extractBashCommand(patterns)
     if (command === null) {
       log.info("skip: no command in pattern", {
         ...base,
@@ -599,7 +599,13 @@ async function respondToPermission(
 /**
  * Coerce OpenCode's pattern field (string | string[] | undefined — under
  * either the SDK-typed `pattern` key or the runtime `patterns` key) into a
- * single command string. Returns `null` when no usable command is present.
+ * single string, taking only the FIRST element of an array. Returns `null`
+ * when no usable value is present.
+ *
+ * Used for the external_directory path, where the array holds independent
+ * paths (a burst), not segments of one compound command — there the first
+ * element is the representative display subject and the full list drives the
+ * cache key separately.
  */
 function extractCommand(
   pattern: string | string[] | undefined,
@@ -610,6 +616,36 @@ function extractCommand(
   if (Array.isArray(pattern) && pattern.length > 0) {
     const first = pattern[0]
     if (typeof first === "string" && first.length > 0) return first
+  }
+  return null
+}
+
+/**
+ * Coerce OpenCode's bash pattern field into the FULL command to classify.
+ *
+ * opencode 1.15.x splits a compound shell command (sub-commands joined by
+ * `&&`, `;`, `|`, etc.) into its constituent pieces and delivers them as a
+ * `patterns` array — e.g. `git add . && git commit -m x` arrives as
+ * `["git add .", "git commit -m x"]`. Classifying only the first element
+ * (the old behaviour) judged a different, frequently safer command than what
+ * actually runs, letting a benign leading segment mask a risky trailing one.
+ *
+ * We therefore re-join all non-empty segments with ` && ` so the classifier
+ * sees the entire command. A single-element array (or a plain string) is
+ * returned unchanged. Returns `null` when there is no usable command text.
+ */
+function extractBashCommand(
+  pattern: string | string[] | undefined,
+): string | null {
+  if (typeof pattern === "string") {
+    return pattern.length > 0 ? pattern : null
+  }
+  if (Array.isArray(pattern)) {
+    const segments = pattern.filter(
+      (p): p is string => typeof p === "string" && p.length > 0,
+    )
+    if (segments.length === 0) return null
+    return segments.join(" && ")
   }
   return null
 }

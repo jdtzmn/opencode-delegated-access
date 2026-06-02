@@ -298,7 +298,11 @@ describe("handlePermissionEvent", () => {
     expect(args?.command).toBe("echo hi")
   })
 
-  it("extracts command from an array pattern (first element)", async () => {
+  it("classifies the FULL compound command, not just the first sub-command", async () => {
+    // opencode 1.15.x splits a compound shell command (joined by &&, ;, |,
+    // etc.) into its constituent sub-commands in `patterns`. Classifying only
+    // patterns[0] would judge a different, often safer command than what
+    // actually runs — a safe first segment could mask a risky later one.
     mockedClassify.mockResolvedValueOnce({
       verdict: "SAFE",
       reason: "r",
@@ -307,7 +311,43 @@ describe("handlePermissionEvent", () => {
 
     const { ctx } = buildCtx()
     await handlePermissionEvent(
-      basePermission({ pattern: ["ls -la", "/fallback"] }),
+      basePermission({ pattern: ["git add .", 'git commit -m "wip"'] }),
+      ctx,
+    )
+
+    const args = mockedClassify.mock.calls[0]?.[0]
+    // Both sub-commands must be present in the classified subject.
+    expect(args?.command).toContain("git add .")
+    expect(args?.command).toContain('git commit -m "wip"')
+  })
+
+  it("does not let a safe first sub-command hide a risky later one", async () => {
+    mockedClassify.mockResolvedValueOnce({
+      verdict: "RISKY",
+      reason: "r",
+    })
+
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(
+      basePermission({ pattern: ["git status", "rm -rf /important"] }),
+      ctx,
+    )
+
+    const args = mockedClassify.mock.calls[0]?.[0]
+    expect(args?.command).toContain("git status")
+    expect(args?.command).toContain("rm -rf /important")
+  })
+
+  it("classifies a single-element array pattern as just that command", async () => {
+    mockedClassify.mockResolvedValueOnce({
+      verdict: "SAFE",
+      reason: "r",
+    })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(
+      basePermission({ pattern: ["ls -la"] }),
       ctx,
     )
 
