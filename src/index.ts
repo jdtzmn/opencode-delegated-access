@@ -268,11 +268,14 @@ const DelegatedAccess: Plugin = async (
       contextMessageCount: config.contextMessageCount,
       safeCountdownMs: config.safeCountdownMs,
       classifierTimeoutMs: config.classifierTimeoutMs,
+      classifierRetries: config.classifierRetries,
       classifierModel: config.classifierModel,
       externalDirectoryEnabled: config.externalDirectoryEnabled,
       directoryVerdictCacheTtlMs: config.directoryVerdictCacheTtlMs,
       approvalHistoryEnabled: config.approvalHistoryEnabled,
       approvalHistoryMax: config.approvalHistoryMax,
+      notifyOnClassifierFailure: config.notifyOnClassifierFailure,
+      classifierFailureNotifyCooldownMs: config.classifierFailureNotifyCooldownMs,
     })
   } catch (e) {
     config = parseConfig(undefined)

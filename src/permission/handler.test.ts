@@ -413,6 +413,18 @@ describe("handlePermissionEvent", () => {
     expect(args?.log).toBe(log)
   })
 
+  it("forwards config.classifierRetries to the classifier", async () => {
+    mockedClassify.mockResolvedValueOnce({ verdict: "SAFE", reason: "r" })
+    mockedSafe.mockResolvedValueOnce("allow")
+
+    const { ctx } = buildCtx()
+    await handlePermissionEvent(basePermission(), ctx)
+
+    const args = mockedClassify.mock.calls[0]?.[0]
+    // DEFAULT_CONFIG.classifierRetries is 1.
+    expect(args?.retries).toBe(1)
+  })
+
   it("does nothing when no classifier model can be resolved", async () => {
     const { ctx, respondCall } = buildCtx({
       sessionModel: undefined,

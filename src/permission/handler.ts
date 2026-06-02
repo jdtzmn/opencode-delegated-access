@@ -434,6 +434,7 @@ async function handleSubjectPermission(args: {
     repoContext,
     priorApprovals,
     log,
+    retries: ctx.config.classifierRetries,
     onEphemeralSessionCreated: (id: string) =>
       ctx.ephemeralSessionIDs.add(id),
     onEphemeralSessionDeleted: (id: string) =>

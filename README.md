@@ -104,11 +104,14 @@ Use the **per-plugin tuple form** — `[pluginSpec, optionsObject]` — to pass 
         "safeCountdownMs": 5000,
         "classifierModel": "anthropic/claude-haiku-4-5",
         "classifierTimeoutMs": 15000,
+        "classifierRetries": 1,
         "notificationSound": true,
         "externalDirectoryEnabled": true,
         "directoryVerdictCacheTtlMs": 60000,
         "approvalHistoryEnabled": true,
-        "approvalHistoryMax": 20
+        "approvalHistoryMax": 20,
+        "notifyOnClassifierFailure": true,
+        "classifierFailureNotifyCooldownMs": 60000
       }
     ]
   ]
@@ -123,12 +126,15 @@ Use the **per-plugin tuple form** — `[pluginSpec, optionsObject]` — to pass 
 | `contextMessageCount` | `3` | How many of **your** recent messages the classifier sees. 0 = no context, just the command. |
 | `safeCountdownMs` | `5000` | Cancellable countdown before auto-dismissing SAFE prompts. `0` = silent instant approve. |
 | `classifierModel` | _auto_ | Override the judge model, e.g. `anthropic/claude-haiku-4-5`. When unset, uses a small fast default for your provider (Haiku, `gpt-5.4-mini`, `gemini-flash-lite`). |
-| `classifierTimeoutMs` | `15000` | How long before we give up on the classifier and leave the TUI prompt alone. |
+| `classifierTimeoutMs` | `15000` | How long before we give up on a single classifier attempt. |
+| `classifierRetries` | `1` | Extra attempts if a classifier call **times out** (transient API stall). Each retry uses a fresh session and the full `classifierTimeoutMs`. `0` disables retry. Only timeouts retry; other failures never do. |
 | `notificationSound` | `true` | OS notification sound on/off. |
 | `externalDirectoryEnabled` | `true` | Also classify `external_directory` permissions (directory access outside the current project). Set to `false` to restrict the plugin to bash commands only. |
 | `directoryVerdictCacheTtlMs` | `60000` | How long (ms) a SAFE directory verdict is cached. Covers rapid burst requests (agent walking a tree) without re-classifying each sub-path individually. `0` disables the cache. |
 | `approvalHistoryEnabled` | `true` | Remember each human Approve/Reject decision made via the OpenCode TUI or our notification, and surface recent ones to the classifier as prior-decision context. Session-scoped, in-memory only. |
 | `approvalHistoryMax` | `20` | Per-session cap on how many recent human decisions the classifier sees. `0` disables playback (entries are still recorded; just not surfaced). |
+| `notifyOnClassifierFailure` | `true` | When the classifier ultimately fails to produce a verdict (after retries), fire an informational desktop notification so you know a transient error happened. The notification is **Reject-only** — it never offers a one-click Approve on an unclassified command. The TUI prompt is always shown too. Set `false` to keep failures silent. |
+| `classifierFailureNotifyCooldownMs` | `60000` | Rate-limit window for failure notifications. At most one fires per window; a burst during an outage collapses into a single notification instead of spamming you. `0` disables the rate limit. |
 
 ### Use OpenCode's existing permission rules for fast-path patterns
 

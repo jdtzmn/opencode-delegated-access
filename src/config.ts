@@ -34,6 +34,14 @@ export const ConfigSchema = z.object({
    */
   classifierTimeoutMs: z.number().int().min(500).max(60_000).default(15_000),
 
+  /**
+   * Number of extra classifier attempts to make if the prompt TIMES OUT.
+   * `1` (default) retries a transient stall once with a fresh ephemeral
+   * session and the full `classifierTimeoutMs`. `0` disables retry. Only
+   * timeouts retry — other failures are never retried. Capped at 10.
+   */
+  classifierRetries: z.number().int().min(0).max(10).default(1),
+
   /** Whether OS notifications play a sound. */
   notificationSound: z.boolean().default(true),
 
@@ -75,6 +83,30 @@ export const ConfigSchema = z.object({
    * Capped at 1000 to bound prompt size and memory.
    */
   approvalHistoryMax: z.number().int().min(0).max(1000).default(20),
+
+  /**
+   * When true (default), fire a desktop notification when the classifier
+   * ultimately FAILS to produce a verdict for a permission (after any
+   * retries) — so you get insight that a transient error happened instead
+   * of silently falling back to the TUI prompt. The notification is
+   * informational + Reject-only (never offers a one-click Approve on an
+   * unclassified command). Set false to keep failures silent.
+   */
+  notifyOnClassifierFailure: z.boolean().default(true),
+
+  /**
+   * Rate-limit window (ms) for classifier-failure notifications. At most one
+   * failure notification fires per window; a burst of failures during a
+   * sustained outage collapses into a single notification rather than
+   * spamming you. `0` disables the rate limit (every failure notifies).
+   * Default 60s.
+   */
+  classifierFailureNotifyCooldownMs: z
+    .number()
+    .int()
+    .min(0)
+    .max(3_600_000)
+    .default(60_000),
 })
 
 export type DelegatedAccessConfig = z.infer<typeof ConfigSchema>

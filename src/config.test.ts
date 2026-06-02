@@ -19,11 +19,14 @@ describe("ConfigSchema", () => {
       safeCountdownMs: 3000,
       classifierModel: "anthropic/claude-haiku-4-5",
       classifierTimeoutMs: 8000,
+      classifierRetries: 2,
       notificationSound: false,
       externalDirectoryEnabled: false,
       directoryVerdictCacheTtlMs: 30_000,
       approvalHistoryEnabled: false,
       approvalHistoryMax: 100,
+      notifyOnClassifierFailure: false,
+      classifierFailureNotifyCooldownMs: 30_000,
     }
     expect(ConfigSchema.parse(input)).toEqual(input)
   })
@@ -67,11 +70,14 @@ describe("ConfigSchema", () => {
       contextMessageCount: 3,
       safeCountdownMs: 5000,
       classifierTimeoutMs: 15_000,
+      classifierRetries: 1,
       notificationSound: true,
       externalDirectoryEnabled: true,
       directoryVerdictCacheTtlMs: 60_000,
       approvalHistoryEnabled: true,
       approvalHistoryMax: 20,
+      notifyOnClassifierFailure: true,
+      classifierFailureNotifyCooldownMs: 60_000,
     })
   })
 
@@ -109,5 +115,52 @@ describe("approvalHistory options", () => {
     expect(() => parseConfig({ approvalHistoryMax: 1001 })).toThrow()
     expect(parseConfig({ approvalHistoryMax: 0 }).approvalHistoryMax).toBe(0)
     expect(parseConfig({ approvalHistoryMax: 50 }).approvalHistoryMax).toBe(50)
+  })
+})
+
+describe("classifier retry / failure-notification options", () => {
+  it("defaults classifierRetries to 1", () => {
+    expect(parseConfig({}).classifierRetries).toBe(1)
+  })
+
+  it("accepts classifierRetries = 0 (disable retry)", () => {
+    expect(parseConfig({ classifierRetries: 0 }).classifierRetries).toBe(0)
+  })
+
+  it("rejects negative classifierRetries", () => {
+    expect(() => parseConfig({ classifierRetries: -1 })).toThrow()
+  })
+
+  it("rejects non-integer classifierRetries", () => {
+    expect(() => parseConfig({ classifierRetries: 1.5 })).toThrow()
+  })
+
+  it("rejects classifierRetries above the sanity bound", () => {
+    expect(() => parseConfig({ classifierRetries: 11 })).toThrow()
+  })
+
+  it("defaults notifyOnClassifierFailure to true", () => {
+    expect(parseConfig({}).notifyOnClassifierFailure).toBe(true)
+  })
+
+  it("accepts notifyOnClassifierFailure = false", () => {
+    expect(parseConfig({ notifyOnClassifierFailure: false }).notifyOnClassifierFailure).toBe(false)
+  })
+
+  it("defaults classifierFailureNotifyCooldownMs to 60000", () => {
+    expect(parseConfig({}).classifierFailureNotifyCooldownMs).toBe(60_000)
+  })
+
+  it("accepts classifierFailureNotifyCooldownMs = 0 (no rate limit)", () => {
+    expect(
+      parseConfig({ classifierFailureNotifyCooldownMs: 0 })
+        .classifierFailureNotifyCooldownMs,
+    ).toBe(0)
+  })
+
+  it("rejects negative classifierFailureNotifyCooldownMs", () => {
+    expect(() =>
+      parseConfig({ classifierFailureNotifyCooldownMs: -1 }),
+    ).toThrow()
   })
 })
