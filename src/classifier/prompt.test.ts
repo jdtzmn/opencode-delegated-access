@@ -78,6 +78,45 @@ describe("CLASSIFIER_SYSTEM_PROMPT", () => {
   })
 })
 
+describe("CLASSIFIER_SYSTEM_PROMPT (leniency for mundane commands)", () => {
+  const lower = CLASSIFIER_SYSTEM_PROMPT.toLowerCase()
+
+  it("states a lean-SAFE guiding principle for read-only/in-project/reversible commands", () => {
+    expect(lower).toMatch(/lean.*safe/)
+    expect(lower).toMatch(/read-only|reversible|scoped to the current project/)
+  })
+
+  it("treats build/test/lint/format/typecheck as SAFE", () => {
+    expect(lower).toMatch(/eslint|prettier|tsc|type-check|linter|formatter/)
+  })
+
+  it("treats installing declared dependencies from a manifest/lockfile as SAFE", () => {
+    expect(lower).toMatch(/npm install|lockfile|declared dependenc/)
+  })
+
+  it("treats routine non-destructive git operations as SAFE", () => {
+    expect(lower).toMatch(/non-destructive git/)
+    expect(lower).toMatch(/git fetch|git switch|git checkout|git stash/)
+  })
+
+  it("leans SAFE on read-only gh pr commands in the current repo", () => {
+    expect(lower).toMatch(/gh pr view|gh pr diff|gh pr status|gh pr list/)
+  })
+
+  it("keeps adding a new arbitrary package leaning RISKY", () => {
+    // Declared deps are SAFE, but introducing a NEW unfamiliar package the
+    // human didn't mention should still require review.
+    expect(lower).toMatch(/new.*package|arbitrary package/)
+    expect(lower).toMatch(/risky/)
+  })
+
+  it("reaffirms that hard-RISKY categories always take precedence over the leniency", () => {
+    expect(lower).toMatch(
+      /hard-risky.*(always|precedence|win)|always.*(take precedence|win)/,
+    )
+  })
+})
+
 describe("buildClassifierUserPrompt", () => {
   it("wraps the command in a <command> delimiter", () => {
     const prompt = buildClassifierUserPrompt({
