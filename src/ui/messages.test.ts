@@ -5,6 +5,8 @@ import {
   extractRootAgent,
   getLastUserMessages,
   getSessionMessages,
+  sanitizeUserMessageForClassifier,
+  CLASSIFIER_MESSAGE_MAX_CHARS,
 } from "./messages.ts"
 import type { MessageEntry } from "./messages.ts"
 
@@ -201,6 +203,28 @@ describe("extractLastUserMessages", () => {
     expect(extractLastUserMessages([entry], 1)).toEqual(["hello"])
   })
 
+  it("sanitizes injected blocks out of each returned message", () => {
+    const entries = [
+      userEntry("1", "<pr_context>huge</pr_context>do the rename"),
+      userEntry("2", "plain request"),
+    ]
+    expect(extractLastUserMessages(entries, 2)).toEqual([
+      "do the rename",
+      "plain request",
+    ])
+  })
+
+  it("drops a user message that becomes empty after sanitization", () => {
+    // A pure pr_context injection contributes nothing once stripped, so it
+    // must not appear as an empty string (and must not consume a K slot).
+    const entries = [
+      userEntry("1", "<pr_context>only injected content</pr_context>"),
+      userEntry("2", "real one"),
+      userEntry("3", "real two"),
+    ]
+    expect(extractLastUserMessages(entries, 2)).toEqual(["real one", "real two"])
+  })
+
   it("returns empty when a user message has only non-text parts", () => {
     const entry: MessageEntry = {
       info: {
@@ -224,6 +248,105 @@ describe("extractLastUserMessages", () => {
     }
     // Message had no text content, so it contributes nothing.
     expect(extractLastUserMessages([entry], 1)).toEqual([])
+  })
+})
+
+describe("sanitizeUserMessageForClassifier", () => {
+  it("returns clean prose unchanged", () => {
+    const text = "please refactor the auth module and run the tests"
+    expect(sanitizeUserMessageForClassifier(text)).toBe(text)
+  })
+
+  it("strips a premind <pr_context> block but keeps surrounding prose", () => {
+    const text =
+      "reply on the PR\n<pr_context>\n<pr_meta>{...huge json...}</pr_meta>\n</pr_context>\nthanks"
+    const out = sanitizeUserMessageForClassifier(text)
+    expect(out).not.toMatch(/<pr_context>/)
+    expect(out).not.toMatch(/pr_meta/)
+    expect(out).toContain("reply on the PR")
+    expect(out).toContain("thanks")
+  })
+
+  it("strips a superpowers <EXTREMELY_IMPORTANT> preamble", () => {
+    const text =
+      "<EXTREMELY_IMPORTANT>\nYou have superpowers. You MUST invoke skills...\n</EXTREMELY_IMPORTANT>\nmake the decider more lenient"
+    const out = sanitizeUserMessageForClassifier(text)
+    expect(out).not.toMatch(/EXTREMELY_IMPORTANT/)
+    expect(out).not.toMatch(/superpowers/)
+    expect(out).toContain("make the decider more lenient")
+  })
+
+  it("strips the hyphenated <EXTREMELY-IMPORTANT> variant", () => {
+    const text =
+      "<EXTREMELY-IMPORTANT>\nrules here\n</EXTREMELY-IMPORTANT>\nactual request"
+    const out = sanitizeUserMessageForClassifier(text)
+    expect(out).not.toMatch(/EXTREMELY-IMPORTANT/)
+    expect(out).toContain("actual request")
+  })
+
+  it("strips <system-reminder> blocks", () => {
+    const text =
+      "do the thing\n<system-reminder>\nMode changed to build.\n</system-reminder>"
+    const out = sanitizeUserMessageForClassifier(text)
+    expect(out).not.toMatch(/system-reminder/)
+    expect(out).not.toMatch(/Mode changed/)
+    expect(out).toContain("do the thing")
+  })
+
+  it("strips <SUBAGENT-STOP> and <available_skills> blocks", () => {
+    const text =
+      "<SUBAGENT-STOP>\nskip\n</SUBAGENT-STOP>\nreal\n<available_skills>\n<skill>x</skill>\n</available_skills>"
+    const out = sanitizeUserMessageForClassifier(text)
+    expect(out).not.toMatch(/SUBAGENT-STOP/)
+    expect(out).not.toMatch(/available_skills/)
+    expect(out).toContain("real")
+  })
+
+  it("strips multiple blocks of different kinds in one message", () => {
+    const text =
+      "<EXTREMELY_IMPORTANT>a</EXTREMELY_IMPORTANT>command me<pr_context>b</pr_context>"
+    const out = sanitizeUserMessageForClassifier(text)
+    expect(out).not.toMatch(/EXTREMELY_IMPORTANT|pr_context/)
+    expect(out).toContain("command me")
+  })
+
+  it("strips an UNCLOSED block to end-of-string (truncated injection)", () => {
+    const text = "real request\n<pr_context>\n<pr_meta>{ huge json that got cut off"
+    const out = sanitizeUserMessageForClassifier(text)
+    expect(out).not.toMatch(/pr_context|pr_meta/)
+    expect(out).toContain("real request")
+  })
+
+  it("is case-insensitive on tag names", () => {
+    const text = "<Pr_Context>x</Pr_Context>keep me"
+    const out = sanitizeUserMessageForClassifier(text)
+    expect(out.toLowerCase()).not.toMatch(/pr_context/)
+    expect(out).toContain("keep me")
+  })
+
+  it("returns an empty string when the message is ONLY an injected block", () => {
+    const text = "<pr_context>\n<pr_meta>{...}</pr_meta>\n</pr_context>"
+    expect(sanitizeUserMessageForClassifier(text)).toBe("")
+  })
+
+  it("caps an over-long message at CLASSIFIER_MESSAGE_MAX_CHARS", () => {
+    const long = "x".repeat(CLASSIFIER_MESSAGE_MAX_CHARS + 5000)
+    const out = sanitizeUserMessageForClassifier(long)
+    expect(out.length).toBeLessThanOrEqual(CLASSIFIER_MESSAGE_MAX_CHARS)
+  })
+
+  it("does not cap a message at or below the limit", () => {
+    const ok = "y".repeat(CLASSIFIER_MESSAGE_MAX_CHARS - 100)
+    expect(sanitizeUserMessageForClassifier(ok)).toBe(ok)
+  })
+
+  it("applies the cap AFTER stripping (a huge pr_context doesn't consume the budget)", () => {
+    // A short real request followed by a massive pr_context block. After
+    // stripping, the result is well under the cap and fully preserved.
+    const realRequest = "rename the helper and commit"
+    const text = realRequest + "<pr_context>" + "j".repeat(500_000) + "</pr_context>"
+    const out = sanitizeUserMessageForClassifier(text)
+    expect(out).toBe(realRequest)
   })
 })
 
