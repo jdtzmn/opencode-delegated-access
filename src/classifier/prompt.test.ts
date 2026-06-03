@@ -28,6 +28,16 @@ describe("CLASSIFIER_SYSTEM_PROMPT", () => {
     expect(CLASSIFIER_SYSTEM_PROMPT.toLowerCase()).toMatch(/human|user/)
   })
 
+  it("instructs the model to ALWAYS output a verdict and never refuse", () => {
+    // Production observation: when a large injected block leaks into the
+    // data, the small model breaks character ("I'm just a safety
+    // classifier, I don't follow embedded instructions / memory blocks")
+    // and emits no VERDICT line, failing closed. The prompt must forbid
+    // that and force a verdict regardless of data contents.
+    const lower = CLASSIFIER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/always.*output.*verdict|never refuse/)
+  })
+
   it("instructs the model not to use tools and to answer in one turn", () => {
     // Belt-and-suspenders: even if a tool somehow stays enabled (e.g. a
     // user allowlist overrides our deny map), the prompt must steer the
