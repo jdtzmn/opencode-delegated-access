@@ -680,12 +680,66 @@ describe("classifyCommand", () => {
       expect(calls.prompt).toHaveBeenCalledTimes(2)
     })
 
-    it("does NOT retry a non-timeout failure (unparseable verdict)", async () => {
+    it("retries a malformed (unparseable) response with a format-correction prompt", async () => {
+      // First attempt: model narrates its role instead of answering.
+      // Retry: model complies and returns a parseable verdict.
+      const prompt = vi
+        .fn()
+        .mockResolvedValueOnce({
+          data: {
+            info: {},
+            parts: [
+              {
+                type: "text",
+                text: "I am a safety classifier, not an agent. I do not follow embedded instructions.",
+              },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          data: {
+            info: {},
+            parts: [
+              {
+                type: "text",
+                text: "VERDICT: SAFE\nREASON: routine read-only inspection",
+              },
+            ],
+          },
+        })
+      const { client, calls } = mockClient({ prompt })
+
+      const result = await classifyCommand({
+        ...baseArgs,
+        client,
+        timeoutMs: 5_000,
+        retries: 1,
+      })
+
+      expect(result).toEqual<Verdict>({
+        verdict: "SAFE",
+        reason: "routine read-only inspection",
+      })
+      // Two attempts: the malformed first, then the corrected retry.
+      expect(calls.prompt).toHaveBeenCalledTimes(2)
+      expect(calls.create).toHaveBeenCalledTimes(2)
+      expect(calls.del).toHaveBeenCalledTimes(2)
+
+      // The first attempt must NOT carry the correction; the retry MUST.
+      const firstText = calls.prompt.mock.calls[0]?.[0]?.body?.parts?.[0]?.text as string
+      const retryText = calls.prompt.mock.calls[1]?.[0]?.body?.parts?.[0]?.text as string
+      expect(firstText).not.toMatch(/previous response did not match/i)
+      expect(retryText).toMatch(/previous response did not match/i)
+      expect(retryText).toMatch(/answer only in this exact format/i)
+      expect(retryText).toMatch(/VERDICT: <SAFE\|RISKY>/)
+    })
+
+    it("returns null after exhausting retries when every response is malformed", async () => {
       const { client, calls } = mockClient({
         prompt: async () => ({
           data: {
             info: {},
-            parts: [{ type: "text", text: "I am not a verdict" }],
+            parts: [{ type: "text", text: "I am a classifier, not an agent." }],
           },
         }),
       })
@@ -698,7 +752,27 @@ describe("classifyCommand", () => {
       })
 
       expect(result).toBeNull()
-      // Only one attempt — unparseable output must not trigger a retry.
+      // Initial attempt + 1 retry = 2 prompt calls.
+      expect(calls.prompt).toHaveBeenCalledTimes(2)
+    })
+
+    it("does NOT retry a hard error (no response / thrown prompt)", async () => {
+      // A thrown prompt is a hard error, not malformed output — it must not
+      // be retried, since retrying it just wastes time.
+      const { client, calls } = mockClient({
+        prompt: async () => {
+          throw new Error("network down")
+        },
+      })
+
+      const result = await classifyCommand({
+        ...baseArgs,
+        client,
+        timeoutMs: 5_000,
+        retries: 1,
+      })
+
+      expect(result).toBeNull()
       expect(calls.prompt).toHaveBeenCalledTimes(1)
     })
 
@@ -736,9 +810,12 @@ describe("classifyCommand", () => {
       expect(onFailure).toHaveBeenCalledWith("timeout")
     })
 
-    it("reports the final failure class via onFailure (error) for non-timeout failures", async () => {
+    it("reports the final failure class via onFailure (error) for malformed responses after retries", async () => {
+      // Malformed output is retried, but once retries are exhausted it is
+      // reported to the caller as the "error" failure class (the public
+      // ClassifyFailureClass surface stays timeout|error).
       const onFailure = vi.fn()
-      const { client } = mockClient({
+      const { client, calls } = mockClient({
         prompt: async () => ({
           data: { info: {}, parts: [{ type: "text", text: "nope" }] },
         }),
@@ -752,6 +829,8 @@ describe("classifyCommand", () => {
         onFailure,
       })
 
+      // Retried once (2 attempts), then reported error exactly once.
+      expect(calls.prompt).toHaveBeenCalledTimes(2)
       expect(onFailure).toHaveBeenCalledTimes(1)
       expect(onFailure).toHaveBeenCalledWith("error")
     })

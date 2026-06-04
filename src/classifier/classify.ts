@@ -170,17 +170,27 @@ export async function classifySubject(args: {
 }): Promise<Verdict | null> {
   const { retries = 0, onFailure } = args
 
-  // Retry loop: only a `timeout` outcome is retried (up to `retries` times).
-  // Any other outcome is final immediately. The full `timeoutMs` is used on
-  // every attempt — a transient stall deserves a real second chance, and the
-  // success case returns fast regardless of the timeout ceiling.
+  // Retry loop: a `timeout` OR a `malformed` (unparseable) outcome is retried
+  // (up to `retries` times). Hard errors (session-create failure, thrown
+  // prompt, empty response) are final immediately — retrying them just wastes
+  // time. The full `timeoutMs` is used on every attempt; the success case
+  // returns fast regardless of the timeout ceiling.
+  //
+  // A retry that FOLLOWS a malformed response asks the model again with an
+  // explicit format-correction instruction appended — small models that
+  // narrate their role instead of emitting a VERDICT line usually comply on
+  // the second, blunter ask.
   const maxAttempts = Math.max(0, retries) + 1
   let lastFailure: ClassifyFailureClass = "error"
+  let priorWasMalformed = false
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const outcome = await classifyOnce(args, attempt, maxAttempts)
+    const outcome = await classifyOnce(args, attempt, maxAttempts, priorWasMalformed)
     if (outcome.kind === "verdict") return outcome.verdict
+    // `malformed` is reported to callers as the "error" failure class — the
+    // public ClassifyFailureClass surface stays timeout|error.
     lastFailure = outcome.kind === "timeout" ? "timeout" : "error"
-    if (outcome.kind !== "timeout") break // only timeouts retry
+    priorWasMalformed = outcome.kind === "malformed"
+    if (outcome.kind !== "timeout" && outcome.kind !== "malformed") break
   }
   onFailure?.(lastFailure)
   return null
@@ -193,7 +203,27 @@ export type ClassifyFailureClass = "timeout" | "error"
 type ClassifyOutcome =
   | { kind: "verdict"; verdict: Verdict }
   | { kind: "timeout" }
+  /** Prompt returned text, but it had no parseable VERDICT line. Retryable. */
+  | { kind: "malformed" }
+  /** Hard failure (create error, thrown prompt, empty response). Not retried. */
   | { kind: "error" }
+
+/**
+ * Instruction appended to the user prompt on a retry that follows a malformed
+ * (unparseable) response. Kept blunt and format-only so a small model that
+ * narrated its role on the first attempt answers correctly the second time.
+ * Wrapped in a delimiter so it reads as a distinct correction, not part of the
+ * original subject.
+ */
+const FORMAT_CORRECTION_INSTRUCTION = `
+
+<format_correction>
+Your previous response did not match the required format.
+Please answer ONLY in this exact format, with no other text:
+VERDICT: <SAFE|RISKY>
+REASON: <one short sentence>
+Classify the original subject again now.
+</format_correction>`
 
 /**
  * A single classifier attempt: create an ephemeral session, prompt with a
@@ -205,6 +235,12 @@ async function classifyOnce(
   args: Parameters<typeof classifySubject>[0],
   attempt: number,
   maxAttempts: number,
+  /**
+   * When true, this attempt follows a malformed response: append
+   * {@link FORMAT_CORRECTION_INSTRUCTION} to the user prompt so the model is
+   * explicitly told to fix its output format.
+   */
+  correctFormat = false,
 ): Promise<ClassifyOutcome> {
   const {
     client,
@@ -247,12 +283,15 @@ async function classifyOnce(
   let timedOut = false
   try {
     // Step 2: classifier prompt with timeout.
-    const userPrompt = buildUserPrompt({
+    const baseUserPrompt = buildUserPrompt({
       subject,
       userMessages,
       repoContext: repoContext ?? null,
       priorApprovals: priorApprovals ?? [],
     })
+    const userPrompt = correctFormat
+      ? baseUserPrompt + FORMAT_CORRECTION_INSTRUCTION
+      : baseUserPrompt
 
     const promptCall = client.session.prompt({
       path: { id: ephemeralID },
@@ -315,14 +354,20 @@ async function classifyOnce(
     const verdict = parseVerdict(text)
     if (!verdict) {
       // Surface the raw model text (truncated) so an output-format break —
-      // e.g. the model looping on tool calls and never emitting a VERDICT
-      // line — is debuggable instead of a silent fail-closed.
-      log?.warn("classifier: response did not parse to a verdict (fail-closed)", {
+      // e.g. the model narrating its role and never emitting a VERDICT line —
+      // is debuggable instead of a silent fail-closed. Returned as
+      // `malformed` (not `error`) so the retry loop gives it a second,
+      // format-corrected attempt before failing closed.
+      log?.warn("classifier: response did not parse to a verdict (malformed)", {
         rawTextPreview: text.slice(0, 500),
         rawTextLength: text.length,
         partCount: response.data?.parts?.length ?? 0,
+        attempt,
+        maxAttempts,
+        willRetry: attempt < maxAttempts,
+        wasFormatCorrected: correctFormat,
       })
-      return { kind: "error" }
+      return { kind: "malformed" }
     }
     return { kind: "verdict", verdict }
   } catch (e) {
