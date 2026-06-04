@@ -35,7 +35,32 @@ describe("CLASSIFIER_SYSTEM_PROMPT", () => {
     // and emits no VERDICT line, failing closed. The prompt must forbid
     // that and force a verdict regardless of data contents.
     const lower = CLASSIFIER_SYSTEM_PROMPT.toLowerCase()
-    expect(lower).toMatch(/always.*output.*verdict|never refuse/)
+    expect(lower).toMatch(/always.*(output|classify|emit)|do not refuse|never refuse/)
+  })
+
+  it("leads with the required two-line output format (format-first)", () => {
+    // The format requirement must come BEFORE any role description so a
+    // small model emits the verdict instead of parroting a "you are a
+    // classifier, not an agent" self-description and stopping there.
+    const lower = CLASSIFIER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/first line must/)
+    expect(lower).toMatch(/verdict: safe/)
+    expect(lower).toMatch(/verdict: risky/)
+  })
+
+  it("tells the model NOT to describe its role", () => {
+    // Direct counter to the observed failure: the model restated its role
+    // ("I am a safety classifier, not an agent...") instead of answering.
+    const lower = CLASSIFIER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/do not describe your role|don't describe your role/)
+  })
+
+  it("no longer opens with the parroted 'you are a classifier, not an agent' line", () => {
+    // That phrasing was being echoed verbatim by the model. It must not
+    // appear in the prompt anymore.
+    expect(CLASSIFIER_SYSTEM_PROMPT).not.toMatch(
+      /You are a classifier, not an agent/,
+    )
   })
 
   it("instructs the model not to use tools and to answer in one turn", () => {
